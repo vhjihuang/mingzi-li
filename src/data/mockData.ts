@@ -1,4 +1,4 @@
-import { Candidate, RefinedCandidate } from '../types/naming';
+import { Candidate, RefinedCandidate } from '../types/naming.ts';
 
 export const mockBatch1: Candidate[] = [
   { id: '1', name: '林清和', meaning: '温和有分寸，整体气质清润平和。', origin: '意象偏向清雅与和顺。' },

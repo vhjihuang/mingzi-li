@@ -5,7 +5,7 @@
 import express from "express";
 import crypto from "crypto";
 import OpenAI from "openai";
-import { mockBatch1, mockShortlists } from "./data/mockData";
+import { mockBatch1, mockShortlists } from "./data/mockData.ts";
 
 // ponytail: cnchar 懒加载——顶层 import 在 Vercel serverless 下崩溃，
 // 延迟到首次调用 tip() 时加载。
