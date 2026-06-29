@@ -1,0 +1,6 @@
+{
+  "name": "中文起名决策原型",
+  "description": "单页低保真流程式起名体验原型",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

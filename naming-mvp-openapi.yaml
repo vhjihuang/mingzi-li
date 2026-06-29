@@ -1,0 +1,376 @@
+openapi: 3.1.0
+info:
+  title: Chinese Naming MVP API
+  version: 0.1.0
+  summary: Minimal API contract for the single-page naming prototype
+  description: >
+    This API is designed for the current MVP flow of the Chinese naming product.
+    It only supports three core actions:
+    1. generate the first batch of candidates
+    2. generate a refined shortlist from user feedback
+    3. refresh the shortlist with another group under the same constraints
+
+servers:
+  - url: http://localhost:3002
+    description: Local development server
+
+tags:
+  - name: Naming
+    description: Minimal naming workflow endpoints for the MVP
+
+paths:
+  /api/naming/batch-1:
+    post:
+      tags: [Naming]
+      operationId: generateBatch1
+      summary: Generate the first batch of candidate names
+      description: >
+        Accepts the user's initial naming intent and returns the first batch
+        of lightweight candidate names for feedback collection.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Batch1Request"
+      responses:
+        "200":
+          description: First batch generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Batch1Response"
+        "400":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/naming/shortlist:
+    post:
+      tags: [Naming]
+      operationId: generateShortlist
+      summary: Generate a refined shortlist from user feedback
+      description: >
+        Accepts the initial naming request, user feedback on first-batch candidates,
+        and refinement preferences, then returns a more focused shortlist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShortlistRequest"
+      responses:
+        "200":
+          description: Refined shortlist generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShortlistResponse"
+        "400":
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/naming/shortlist/refresh:
+    post:
+      tags: [Naming]
+      operationId: refreshShortlist
+      summary: Generate another shortlist group under the same constraints
+      description: >
+        Returns another shortlist using the same naming inputs and feedback,
+        while excluding already shown shortlist candidates.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShortlistRefreshRequest"
+      responses:
+        "200":
+          description: Alternate shortlist generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShortlistResponse"
+        "400":
+          description: >
+            Invalid request payload or no more candidates available.
+            Error codes: INVALID_REQUEST (missing/invalid fields),
+            NO_MORE_CANDIDATES (all candidates have been shown under current constraints).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    Batch1Request:
+      type: object
+      additionalProperties: false
+      required:
+        - surname
+        - expectations
+      properties:
+        surname:
+          type: string
+          minLength: 1
+          description: The surname entered by the user
+          examples: ["林"]
+        expectations:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            type: string
+          description: User-selected naming expectations
+          examples:
+            - ["温和有分寸", "有志向看得远"]
+        additionalNote:
+          type: string
+          description: Optional free-form note from the user
+          examples: ["不要太热门"]
+
+    Batch1Response:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - candidates
+      properties:
+        requestId:
+          type: string
+          description: Server-generated identifier for this first-batch request
+          examples: ["req_batch1_xxx"]
+        candidates:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Candidate"
+
+    Candidate:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - meaning
+        - origin
+      properties:
+        id:
+          type: string
+          examples: ["c1"]
+        name:
+          type: string
+          examples: ["林清和"]
+        meaning:
+          type: string
+          description: Lightweight meaning shown in the first-batch candidate card
+          examples: ["温和有分寸，整体气质清润平和。"]
+        origin:
+          type: string
+          description: Lightweight origin or imagery note
+          examples: ["意象偏向清雅与和顺。"]
+
+    CandidateFeedback:
+      type: object
+      additionalProperties: false
+      required:
+        - candidateId
+        - feedback
+      properties:
+        candidateId:
+          type: string
+          examples: ["c1"]
+        feedback:
+          $ref: "#/components/schemas/FeedbackType"
+        reason:
+          type:
+            - string
+            - "null"
+          description: Optional reason when feedback is neutral or dislike
+          examples: [null, "太普通"]
+        name:
+          type: string
+          description: Optional candidate name carried from the first-batch card
+          examples: ["林清和"]
+        meaning:
+          type: string
+          description: Optional candidate meaning carried from the first-batch card
+          examples: ["温和有分寸，整体气质清润平和。"]
+        origin:
+          type: string
+          description: Optional candidate origin carried from the first-batch card
+          examples: ["意象偏向清雅与和顺。"]
+
+    FeedbackType:
+      type: string
+      enum:
+        - like
+        - neutral
+        - dislike
+
+    ShortlistRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - surname
+        - expectations
+        - candidateFeedbacks
+        - refinements
+      properties:
+        requestId:
+          type: string
+          description: Optional request ID returned by batch-1
+          examples: ["req_batch1_xxx"]
+        surname:
+          type: string
+          minLength: 1
+          examples: ["林"]
+        expectations:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            type: string
+          examples:
+            - ["温和有分寸", "有志向看得远"]
+        additionalNote:
+          type: string
+          examples: ["不要太热门"]
+        candidateFeedbacks:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/CandidateFeedback"
+        refinements:
+          type: array
+          items:
+            type: string
+          description: Optional refinement chips selected by the user
+          examples:
+            - ["更稳一点", "更有书卷气"]
+        refinementNote:
+          type: string
+          examples: ["想保留温和感，但别太软"]
+
+    ShortlistRefreshRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - surname
+        - expectations
+        - candidateFeedbacks
+        - refinements
+        - excludeCandidateIds
+      properties:
+        requestId:
+          type: string
+          description: Optional request ID returned by batch-1
+          examples: ["req_batch1_xxx"]
+        shortlistRequestId:
+          type: string
+          description: Optional shortlist request ID from the previous shortlist response
+          examples: ["req_shortlist_xxx"]
+        surname:
+          type: string
+          minLength: 1
+          examples: ["林"]
+        expectations:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            type: string
+          examples:
+            - ["温和有分寸", "有志向看得远"]
+        additionalNote:
+          type: string
+          examples: ["不要太热门"]
+        candidateFeedbacks:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/CandidateFeedback"
+        refinements:
+          type: array
+          items:
+            type: string
+          examples:
+            - ["更稳一点", "更有书卷气"]
+        refinementNote:
+          type: string
+          examples: ["想保留温和感，但别太软"]
+        excludeCandidateIds:
+          type: array
+          items:
+            type: string
+          description: Candidate IDs already shown in the previous shortlist
+          examples:
+            - ["s1", "s2", "s3"]
+        excludeCandidateNames:
+          type: array
+          items:
+            type: string
+          description: Candidate names already shown, used for AI-path deduplication by name
+          examples:
+            - ["林修远", "林以忱"]
+
+    ShortlistResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - shortlistRequestId
+        - candidates
+      properties:
+        shortlistRequestId:
+          type: string
+          examples: ["req_shortlist_xxx"]
+        candidates:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RefinedCandidate"
+
+    RefinedCandidate:
+      allOf:
+        - $ref: "#/components/schemas/Candidate"
+        - type: object
+          additionalProperties: false
+          required:
+            - coreMeaning
+            - fitReason
+            - tip
+          properties:
+            coreMeaning:
+              type: string
+              examples: ["修养自身，目光深远"]
+            fitReason:
+              type: string
+              examples: ["更贴近你强调的“稳”和“志向感”。"]
+            tip:
+              type: string
+              examples: ["名字声调平缓，不算冷僻。"]
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          enum:
+            - INVALID_REQUEST
+            - NO_MORE_CANDIDATES
+          description: >
+            INVALID_REQUEST: missing or invalid fields.
+            NO_MORE_CANDIDATES: no new candidates available under current constraints.
+          examples: ["INVALID_REQUEST"]
+        message:
+          type: string
+          examples: ["surname is required"]
