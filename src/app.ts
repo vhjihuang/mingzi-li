@@ -5,10 +5,23 @@
 import express from "express";
 import crypto from "crypto";
 import OpenAI from "openai";
-import cnchar from "cnchar";
-// @ts-ignore — cnchar 插件无类型声明
-import "cnchar-poly";
 import { mockBatch1, mockShortlists } from "./data/mockData";
+
+// ponytail: cnchar 懒加载——顶层 import 在 Vercel serverless 下崩溃，
+// 延迟到首次调用 tip() 时加载。
+let _cnchar: any = null;
+async function ensureCnchar() {
+  if (_cnchar !== null) return;
+  try {
+    const mod = await import("cnchar");
+    _cnchar = mod.default;
+    // @ts-ignore — cnchar 插件无类型声明
+    await import("cnchar-poly");
+  } catch (e) {
+    console.error("[cnchar] lazy load failed:", e);
+    _cnchar = false;
+  }
+}
 
 // ── 配置 ──
 
@@ -49,10 +62,11 @@ function parseAiJson(text: string): any[] {
 }
 
 function tip(name: string): string {
+  if (!_cnchar) return "";
   try {
     const chars = name.split("");
-    const py = cnchar.spell(name, "array", "tone") as string[];
-    const strokes = chars.map((c) => cnchar.stroke(c) as number);
+    const py = _cnchar.spell(name, "array", "tone") as string[];
+    const strokes = chars.map((c) => _cnchar.stroke(c) as number);
     const total = strokes.reduce((a, b) => a + b, 0);
     return `读音 ${py.join(" ")}｜笔画 ${chars.map((c, i) => `${c}${strokes[i]}`).join(" ")}（共${total}画）`;
   } catch {
@@ -240,6 +254,7 @@ export function createApp() {
     );
     if (candidates.length === 0) candidates = fallbackShortlist();
 
+    await ensureCnchar();
     candidates = applyTip(candidates);
     candidates = mergeLiked(candidates, likedFb, surname, refinements);
     sessionStore.set(shortlistId, session);
@@ -270,6 +285,7 @@ export function createApp() {
       return;
     }
 
+    await ensureCnchar();
     candidates = applyTip(candidates);
     candidates = mergeLiked(candidates, likedFb, surname, refinements);
     const shortlistId = crypto.randomUUID();
