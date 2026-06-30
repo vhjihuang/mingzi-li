@@ -36,8 +36,8 @@ function getAi(): OpenAI | null {
       ? new OpenAI({
           apiKey: process.env.GLM_API_KEY,
           baseURL: "https://open.bigmodel.cn/api/paas/v4",
-          timeout: 30000,
-          maxRetries: 2,
+          timeout: 25000, // ponytail: 25s × 2(callWithRetry) = 50s < 60s Vercel 上限
+          maxRetries: 0,  // ponytail: 关 SDK 内置重试，由 callWithRetry 显式控制，避免叠加到 90s+
         })
       : null;
   }
