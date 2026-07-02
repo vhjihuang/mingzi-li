@@ -276,6 +276,11 @@ export function createApp() {
       ), surname, true
     ).filter((c) => !exclude.has(c.name));
 
+    // AI 结果为空时先 fallback，再过滤已展示名字，避免过早返回 NO_MORE_CANDIDATES
+    if (candidates.length === 0) {
+      candidates = fallbackShortlist().filter((c) => !exclude.has(c.name));
+    }
+
     if (candidates.length === 0) {
       res.status(400).json({ error: "NO_MORE_CANDIDATES", message: "no more candidates available under current constraints" });
       return;
