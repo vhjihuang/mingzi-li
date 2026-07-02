@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { AppState, FeedbackRecord, FeedbackType, Candidate, RefinedCandidate } from '../types/naming';
 
 /** fetch 超时包装：30s 后自动 abort */
-const FETCH_TIMEOUT_MS = 30_000;
+const FETCH_TIMEOUT_MS = 60_000; // 匹配 Vercel maxDuration: 60s
 function fetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -44,6 +44,9 @@ export function useNamingFlow() {
   // Phase 3 inputs (Refinement)
   const [selectedRefinements, setSelectedRefinements] = useState<string[]>([]);
   const [refinementInput, setRefinementInput] = useState('');
+
+  // 累积所有已展示名字，跨轮去重（不依赖 server 端 session，serverless 无状态）
+  const [shownNames, setShownNames] = useState<string[]>([]);
 
   // 收藏的候选名字（跨 swap 保留完整对象，跨会话持久化到 localStorage）
   const [savedCandidates, setSavedCandidates] = useState<RefinedCandidate[]>(loadSavedCandidates);
@@ -112,8 +115,10 @@ export function useNamingFlow() {
       if (!res.ok) throw new Error('请求第一批名字时出错，请稍后重试');
       
       const data = await res.json();
+      const names = (data.candidates || []).map((c: Candidate) => c.name);
       setBatch1RequestId(data.requestId);
       setBatch1Candidates(data.candidates || []);
+      setShownNames(names);
       setAppState('batch1_ready');
     } catch (err: any) {
       setErrorMessage(classifyFetchError(err, '生成候选名字失败，请稍后重试'));
@@ -153,6 +158,7 @@ export function useNamingFlow() {
           candidateFeedbacks: getCandidateFeedbacksPayload(),
           refinements: selectedRefinements,
           refinementNote: refinementInput,
+          excludeNames: shownNames, // batch1 已展示名字，避免 shortlist 重复
         }),
       });
       if (!res.ok) {
@@ -164,8 +170,10 @@ export function useNamingFlow() {
       }
       
       const data = await res.json();
+      const names = (data.candidates || []).map((c: RefinedCandidate) => c.name);
       setShortlistRequestId(data.shortlistRequestId || data.requestId);
       setShortlistCandidates(data.candidates || []);
+      setShownNames(prev => [...new Set([...prev, ...names])]);
       setAppState('shortlist_ready');
     } catch (err: any) {
       setErrorMessage(classifyFetchError(err, '请求精细筛选时出错，请稍候重试'));
@@ -180,9 +188,6 @@ export function useNamingFlow() {
     setErrorMessage(null);
     setLastFailedAction(null);
     try {
-      const excludeCandidateIds = shortlistCandidates.map(c => c.id);
-      const excludeCandidateNames = shortlistCandidates.map(c => c.name);
-      
       const res = await fetchWithTimeout('/api/naming/shortlist/refresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -195,8 +200,7 @@ export function useNamingFlow() {
           candidateFeedbacks: getCandidateFeedbacksPayload(),
           refinements: selectedRefinements,
           refinementNote: refinementInput,
-          excludeCandidateIds,
-          excludeCandidateNames,
+          excludeCandidateNames: shownNames, // 累积全部已展示名字，不只当前轮
         }),
       });
       if (!res.ok) {
@@ -208,8 +212,10 @@ export function useNamingFlow() {
       }
       
       const data = await res.json();
+      const names = (data.candidates || []).map((c: RefinedCandidate) => c.name);
       setShortlistRequestId(data.shortlistRequestId || shortlistRequestId);
       setShortlistCandidates(data.candidates || []);
+      setShownNames(prev => [...new Set([...prev, ...names])]);
       setAppState('shortlist_ready');
     } catch (err: any) {
       setErrorMessage(classifyFetchError(err, '请求换一组时出错，请稍候重试'));
@@ -236,6 +242,7 @@ export function useNamingFlow() {
     setShortlistRequestId(undefined);
     setBatch1Candidates([]);
     setShortlistCandidates([]);
+    setShownNames([]);
     setFeedbacks({});
     setSelectedRefinements([]);
     setRefinementInput('');

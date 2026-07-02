@@ -44,9 +44,6 @@ function getAi(): OpenAI | null {
   return _ai;
 }
 
-// ponytail: 内存 session，demo 够用。Vercel serverless 无状态会丢，但 mock fallback 兜底
-const sessionStore = new Map<string, any>();
-
 // ── 工具函数 ──
 
 function sanitize(input: string): string {
@@ -100,7 +97,7 @@ function normalize(raw: any[], surname: string, isShortlist: boolean): any[] {
 /** ponytail: 合并两个 90% 相同的 prompt builder。batch-1 用 isBatch1 控制 */
 function buildPrompt(opts: {
   surname: string; expectations: string[]; feedbacks: any[];
-  refinements: string[]; note: string; excludeNames?: string[]; isBatch1?: boolean;
+  refinements: string[]; note: string; excludeNames?: string[]; isBatch1?: boolean; isRefresh?: boolean;
 }): string {
   const surname = sanitize(opts.surname);
   const exp = opts.expectations.map(sanitize).join("、");
@@ -132,7 +129,7 @@ function buildPrompt(opts: {
     ? `\n【去重】不要再推荐：${opts.excludeNames.map(sanitize).join("、")}（保留的喜欢名字除外）。`
     : "";
 
-  const isRefresh = !!opts.excludeNames;
+  const isRefresh = opts.isRefresh ?? false; // ponytail: 解耦 isRefresh 和 excludeNames，shortlist 也可传 excludeNames
   const header = isRefresh
     ? "用户正在换一批深度筛选的名字。请给出另外 3 个完全不同的高品质候选（保留的喜欢名字除外）。"
     : "在第一轮初选后，用户给出了反馈。请给出 3 个最终版深度候选（避开不喜欢的风格，发扬喜欢的风格）。";
@@ -219,8 +216,6 @@ export function createApp() {
     }
 
     const requestId = crypto.randomUUID();
-    const session = { surname, expectations, batch1Shown: [] as string[], shortlistShown: [] as string[] };
-    sessionStore.set(requestId, session);
 
     let candidates = normalize(
       await callWithRetry(
@@ -230,25 +225,23 @@ export function createApp() {
     );
     if (candidates.length === 0) candidates = fallbackBatch1();
 
-    candidates.forEach((c) => session.batch1Shown.push(c.name));
     console.log(`[batch-1] rid=${requestId.slice(0, 8)} count=${candidates.length}`);
     res.json({ requestId, candidates });
   });
 
   app.post("/api/naming/shortlist", async (req, res) => {
-    const { requestId, surname, expectations, candidateFeedbacks, refinements, refinementNote } = req.body;
+    const { requestId, surname, expectations, candidateFeedbacks, refinements, refinementNote, excludeNames } = req.body;
     if (!surname || !Array.isArray(expectations) || !Array.isArray(candidateFeedbacks) || !Array.isArray(refinements)) {
       res.status(400).json({ error: "INVALID_REQUEST" });
       return;
     }
 
     const shortlistId = crypto.randomUUID();
-    const session = sessionStore.get(requestId) || { surname, expectations, batch1Shown: [], shortlistShown: [] };
     const likedFb = candidateFeedbacks.filter((f: any) => f.feedback === "like");
 
     let candidates = normalize(
       await callWithRetry(
-        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: refinementNote || "" }),
+        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: refinementNote || "", excludeNames }),
         0.7, 1000
       ), surname, true
     );
@@ -257,25 +250,20 @@ export function createApp() {
     await ensureCnchar();
     candidates = applyTip(candidates);
     candidates = mergeLiked(candidates, likedFb, surname, refinements);
-    sessionStore.set(shortlistId, session);
-    candidates.forEach((c) => session.shortlistShown.push(c.name));
     console.log(`[shortlist] rid=${shortlistId.slice(0, 8)} count=${candidates.length}`);
     res.json({ shortlistRequestId: shortlistId, candidates });
   });
 
   app.post("/api/naming/shortlist/refresh", async (req, res) => {
     const { shortlistRequestId: prevId, surname, expectations, candidateFeedbacks, refinements, refinementNote, excludeCandidateNames } = req.body;
-    const session = sessionStore.get(prevId) || { surname, expectations, batch1Shown: [], shortlistShown: [] };
-    const exclude = new Set<string>([
-      ...(Array.isArray(excludeCandidateNames) ? excludeCandidateNames : []),
-      ...(session.shortlistShown || []),
-    ]);
+    // ponytail: 去重完全由前端 shownNames 驱动，不依赖 sessionStore（serverless 无状态）
+    const exclude = new Set<string>(Array.isArray(excludeCandidateNames) ? excludeCandidateNames : []);
     const likedFb = candidateFeedbacks.filter((f: any) => f.feedback === "like");
     likedFb.forEach((f: any) => exclude.delete(f.name || ""));
 
     let candidates = normalize(
       await callWithRetry(
-        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: refinementNote || "", excludeNames: [...exclude] }),
+        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: refinementNote || "", excludeNames: [...exclude], isRefresh: true }),
         0.7, 1000
       ), surname, true
     ).filter((c) => !exclude.has(c.name));
@@ -289,7 +277,6 @@ export function createApp() {
     candidates = applyTip(candidates);
     candidates = mergeLiked(candidates, likedFb, surname, refinements);
     const shortlistId = crypto.randomUUID();
-    sessionStore.set(shortlistId, session);
     console.log(`[refresh] rid=${shortlistId.slice(0, 8)} count=${candidates.length}`);
     res.json({ shortlistRequestId: shortlistId, candidates });
   });
