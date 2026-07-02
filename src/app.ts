@@ -211,7 +211,7 @@ export function createApp() {
   app.post("/api/naming/batch-1", async (req, res) => {
     const { surname, expectations, additionalNote } = req.body;
     if (!surname || !Array.isArray(expectations) || !expectations.length) {
-      res.status(400).json({ error: "INVALID_REQUEST" });
+      res.status(400).json({ error: "INVALID_REQUEST", message: "surname and expectations are required" });
       return;
     }
 
@@ -230,18 +230,20 @@ export function createApp() {
   });
 
   app.post("/api/naming/shortlist", async (req, res) => {
-    const { requestId, surname, expectations, candidateFeedbacks, refinements, refinementNote, excludeNames } = req.body;
-    if (!surname || !Array.isArray(expectations) || !Array.isArray(candidateFeedbacks) || !Array.isArray(refinements)) {
-      res.status(400).json({ error: "INVALID_REQUEST" });
+    const { requestId, surname, expectations, candidateFeedbacks, refinements, refinementNote, additionalNote, excludeNames } = req.body;
+    if (!surname || !Array.isArray(expectations) || !expectations.length || !Array.isArray(candidateFeedbacks) || !Array.isArray(refinements)) {
+      res.status(400).json({ error: "INVALID_REQUEST", message: "surname, expectations, candidateFeedbacks, refinements are required" });
       return;
     }
 
     const shortlistId = crypto.randomUUID();
     const likedFb = candidateFeedbacks.filter((f: any) => f.feedback === "like");
 
+    // additionalNote（第一步补充）和 refinementNote（第三步微调）合并传入 prompt
+    const combinedNote = [additionalNote, refinementNote].filter(Boolean).join("；");
     let candidates = normalize(
       await callWithRetry(
-        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: refinementNote || "", excludeNames }),
+        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: combinedNote, excludeNames }),
         0.7, 1000
       ), surname, true
     );
@@ -255,21 +257,27 @@ export function createApp() {
   });
 
   app.post("/api/naming/shortlist/refresh", async (req, res) => {
-    const { shortlistRequestId: prevId, surname, expectations, candidateFeedbacks, refinements, refinementNote, excludeCandidateNames } = req.body;
+    const { shortlistRequestId: prevId, surname, expectations, candidateFeedbacks, refinements, refinementNote, additionalNote, excludeCandidateNames } = req.body;
+    if (!surname || !Array.isArray(expectations) || !expectations.length || !Array.isArray(candidateFeedbacks) || !Array.isArray(refinements)) {
+      res.status(400).json({ error: "INVALID_REQUEST", message: "surname, expectations, candidateFeedbacks, refinements are required" });
+      return;
+    }
     // ponytail: 去重完全由前端 shownNames 驱动，不依赖 sessionStore（serverless 无状态）
     const exclude = new Set<string>(Array.isArray(excludeCandidateNames) ? excludeCandidateNames : []);
     const likedFb = candidateFeedbacks.filter((f: any) => f.feedback === "like");
     likedFb.forEach((f: any) => exclude.delete(f.name || ""));
 
+    // additionalNote（第一步补充）和 refinementNote（第三步微调）合并传入 prompt
+    const combinedNote = [additionalNote, refinementNote].filter(Boolean).join("；");
     let candidates = normalize(
       await callWithRetry(
-        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: refinementNote || "", excludeNames: [...exclude], isRefresh: true }),
+        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: combinedNote, excludeNames: [...exclude], isRefresh: true }),
         0.7, 1000
       ), surname, true
     ).filter((c) => !exclude.has(c.name));
 
     if (candidates.length === 0) {
-      res.status(400).json({ error: "NO_MORE_CANDIDATES" });
+      res.status(400).json({ error: "NO_MORE_CANDIDATES", message: "no more candidates available under current constraints" });
       return;
     }
 

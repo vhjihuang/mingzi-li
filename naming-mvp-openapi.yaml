@@ -256,6 +256,13 @@ components:
         refinementNote:
           type: string
           examples: ["想保留温和感，但别太软"]
+        excludeNames:
+          type: array
+          items:
+            type: string
+          description: Candidate names already shown in batch-1, used to avoid duplicates in the shortlist
+          examples:
+            - ["林清和", "林修远"]
 
     ShortlistRefreshRequest:
       type: object
@@ -265,7 +272,6 @@ components:
         - expectations
         - candidateFeedbacks
         - refinements
-        - excludeCandidateIds
       properties:
         requestId:
           type: string
@@ -304,13 +310,6 @@ components:
         refinementNote:
           type: string
           examples: ["想保留温和感，但别太软"]
-        excludeCandidateIds:
-          type: array
-          items:
-            type: string
-          description: Candidate IDs already shown in the previous shortlist
-          examples:
-            - ["s1", "s2", "s3"]
         excludeCandidateNames:
           type: array
           items:
