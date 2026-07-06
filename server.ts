@@ -5,7 +5,7 @@
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
-import { createApp } from "./src/app";
+import { createApp } from "./src/app.ts";
 
 dotenv.config({ path: ".env.local" });
 
