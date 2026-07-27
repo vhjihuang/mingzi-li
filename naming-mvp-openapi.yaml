@@ -46,6 +46,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Request body exceeds the server limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many naming requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/naming/shortlist:
     post:
@@ -70,6 +82,18 @@ paths:
                 $ref: "#/components/schemas/ShortlistResponse"
         "400":
           description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Request body exceeds the server limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many naming requests
           content:
             application/json:
               schema:
@@ -101,6 +125,18 @@ paths:
             Invalid request payload or no more candidates available.
             Error codes: INVALID_REQUEST (missing/invalid fields),
             NO_MORE_CANDIDATES (all candidates have been shown under current constraints).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Request body exceeds the server limit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many naming requests
           content:
             application/json:
               schema:
@@ -140,6 +176,8 @@ components:
       required:
         - requestId
         - candidates
+        - source
+        - degraded
       properties:
         requestId:
           type: string
@@ -150,6 +188,13 @@ components:
           minItems: 1
           items:
             $ref: "#/components/schemas/Candidate"
+        source:
+          $ref: "#/components/schemas/GenerationSource"
+        degraded:
+          type: boolean
+          description: Whether fallback candidates were used
+        degradationReason:
+          $ref: "#/components/schemas/DegradationReason"
 
     Candidate:
       type: object
@@ -324,6 +369,8 @@ components:
       required:
         - shortlistRequestId
         - candidates
+        - source
+        - degraded
       properties:
         shortlistRequestId:
           type: string
@@ -333,6 +380,35 @@ components:
           minItems: 1
           items:
             $ref: "#/components/schemas/RefinedCandidate"
+        source:
+          $ref: "#/components/schemas/GenerationSource"
+        degraded:
+          type: boolean
+          description: Whether fallback candidates were used
+        degradationReason:
+          $ref: "#/components/schemas/DegradationReason"
+
+    GenerationSource:
+      type: string
+      enum:
+        - ai
+        - mixed
+        - fallback
+      description: >
+        ai: all candidates came from the model.
+        mixed: model candidates were supplemented with fallback candidates.
+        fallback: all candidates came from built-in fallback data.
+
+    DegradationReason:
+      type: string
+      enum:
+        - AI_NOT_CONFIGURED
+        - AI_TIMEOUT
+        - AI_RATE_LIMITED
+        - AI_AUTH_ERROR
+        - AI_INVALID_RESPONSE
+        - AI_PROVIDER_ERROR
+        - AI_RESULT_REJECTED
 
     RefinedCandidate:
       allOf:
@@ -366,9 +442,13 @@ components:
           enum:
             - INVALID_REQUEST
             - NO_MORE_CANDIDATES
+            - RATE_LIMITED
+            - INTERNAL_ERROR
           description: >
             INVALID_REQUEST: missing or invalid fields.
             NO_MORE_CANDIDATES: no new candidates available under current constraints.
+            RATE_LIMITED: request quota exceeded.
+            INTERNAL_ERROR: unexpected server error.
           examples: ["INVALID_REQUEST"]
         message:
           type: string
