@@ -9,6 +9,38 @@ function fetchWithTimeout(url: string, options: RequestInit): Promise<Response> 
   return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
+async function responseError(response: Response, fallback: string): Promise<Error> {
+  const body = await response.json().catch(() => null);
+  if (response.status === 429) {
+    return new Error('请求过于频繁，请稍后再试');
+  }
+  if (response.status === 413) {
+    return new Error('输入内容过长，请精简后重试');
+  }
+  if (body?.error === 'NO_MORE_CANDIDATES') {
+    return new Error('当前条件下没有更多候选名字了，试试调整微调方向吧');
+  }
+  if (response.status === 400) {
+    return new Error(body?.message ? `输入内容不符合要求：${body.message}` : '输入内容不符合要求，请检查后重试');
+  }
+  return new Error(fallback);
+}
+
+function degradationNotice(data: {
+  degraded?: boolean;
+  source?: 'ai' | 'mixed' | 'fallback';
+  degradationReason?: string;
+}): string | null {
+  if (!data.degraded) return null;
+  if (data.degradationReason === 'AI_NOT_CONFIGURED') {
+    return '当前未配置 AI 服务，展示的是内置演示候选。';
+  }
+  if (data.source === 'mixed') {
+    return 'AI 返回的有效候选不足，已使用备用候选补足本轮结果。';
+  }
+  return 'AI 服务暂时不可用，本轮展示的是备用候选。';
+}
+
 const STORAGE_KEY = 'naming_saved_candidates';
 
 /** 从 localStorage 读取收藏的候选名字 */
@@ -26,6 +58,7 @@ function loadSavedCandidates(): RefinedCandidate[] {
 export function useNamingFlow() {
   const [appState, setAppState] = useState<AppState>('input');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
   
   // Phase 1 inputs
   const [surname, setSurname] = useState('');
@@ -101,6 +134,7 @@ export function useNamingFlow() {
     if (appState === 'generating_batch1') return; // 防双击
     setAppState('generating_batch1');
     setErrorMessage(null);
+    setNoticeMessage(null);
     setLastFailedAction(null);
     try {
       const res = await fetchWithTimeout('/api/naming/batch-1', {
@@ -112,13 +146,14 @@ export function useNamingFlow() {
           additionalNote: additionalInput,
         }),
       });
-      if (!res.ok) throw new Error('请求第一批名字时出错，请稍后重试');
+      if (!res.ok) throw await responseError(res, '请求第一批名字时出错，请稍后重试');
       
       const data = await res.json();
       const names = (data.candidates || []).map((c: Candidate) => c.name);
       setBatch1RequestId(data.requestId);
       setBatch1Candidates(data.candidates || []);
       setShownNames(names);
+      setNoticeMessage(degradationNotice(data));
       setAppState('batch1_ready');
     } catch (err: any) {
       setErrorMessage(classifyFetchError(err, '生成候选名字失败，请稍后重试'));
@@ -145,6 +180,7 @@ export function useNamingFlow() {
     if (appState === 'generating_shortlist') return; // 防双击
     setAppState('generating_shortlist');
     setErrorMessage(null);
+    setNoticeMessage(null);
     setLastFailedAction(null);
     try {
       const res = await fetchWithTimeout('/api/naming/shortlist', {
@@ -161,19 +197,14 @@ export function useNamingFlow() {
           excludeNames: shownNames, // batch1 已展示名字，避免 shortlist 重复
         }),
       });
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => null);
-        const msg = errBody?.error === 'NO_MORE_CANDIDATES'
-          ? '当前条件下没有更多候选名字了，试试调整微调方向吧'
-          : '请求精细筛选时出错，请稍候重试';
-        throw new Error(msg);
-      }
+      if (!res.ok) throw await responseError(res, '请求精细筛选时出错，请稍候重试');
       
       const data = await res.json();
       const names = (data.candidates || []).map((c: RefinedCandidate) => c.name);
       setShortlistRequestId(data.shortlistRequestId || data.requestId);
       setShortlistCandidates(data.candidates || []);
       setShownNames(prev => [...new Set([...prev, ...names])]);
+      setNoticeMessage(degradationNotice(data));
       setAppState('shortlist_ready');
     } catch (err: any) {
       setErrorMessage(classifyFetchError(err, '请求精细筛选时出错，请稍候重试'));
@@ -186,6 +217,7 @@ export function useNamingFlow() {
     if (appState === 'generating_shortlist') return; // 防双击
     setAppState('generating_shortlist');
     setErrorMessage(null);
+    setNoticeMessage(null);
     setLastFailedAction(null);
     try {
       const res = await fetchWithTimeout('/api/naming/shortlist/refresh', {
@@ -203,19 +235,14 @@ export function useNamingFlow() {
           excludeCandidateNames: shownNames, // 累积全部已展示名字，不只当前轮
         }),
       });
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => null);
-        const msg = errBody?.error === 'NO_MORE_CANDIDATES'
-          ? '当前条件下没有更多候选名字了，试试调整微调方向吧'
-          : '请求换一组时出错，请稍候重试';
-        throw new Error(msg);
-      }
+      if (!res.ok) throw await responseError(res, '请求换一组时出错，请稍候重试');
       
       const data = await res.json();
       const names = (data.candidates || []).map((c: RefinedCandidate) => c.name);
       setShortlistRequestId(data.shortlistRequestId || shortlistRequestId);
       setShortlistCandidates(data.candidates || []);
       setShownNames(prev => [...new Set([...prev, ...names])]);
+      setNoticeMessage(degradationNotice(data));
       setAppState('shortlist_ready');
     } catch (err: any) {
       setErrorMessage(classifyFetchError(err, '请求换一组时出错，请稍候重试'));
@@ -235,6 +262,7 @@ export function useNamingFlow() {
   const restart = () => {
     setAppState('input');
     setErrorMessage(null);
+    setNoticeMessage(null);
     setSurname('');
     setSelectedTraits([]);
     setAdditionalInput('');
@@ -255,7 +283,7 @@ export function useNamingFlow() {
   const hasFeedbacks = Object.values(feedbacks).some(f => (f as FeedbackRecord).type !== null);
 
   return {
-    appState, errorMessage, lastFailedAction,
+    appState, errorMessage, noticeMessage, lastFailedAction,
     surname, setSurname,
     selectedTraits, setSelectedTraits,
     additionalInput, setAdditionalInput,

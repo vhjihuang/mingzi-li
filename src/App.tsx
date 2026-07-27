@@ -91,6 +91,15 @@ export default function App() {
               )}
             </div>
           )}
+
+          {flow.noticeMessage && (
+            <div className="mt-6 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <span className="font-medium">结果说明：</span>{flow.noticeMessage}
+              </div>
+            </div>
+          )}
         </header>
 
         <NamingInputSection 
@@ -145,6 +154,10 @@ export default function App() {
             />
           )}
         </AnimatePresence>
+
+        <footer className="pt-4 border-t border-gray-200 text-xs leading-relaxed text-gray-400">
+          候选名字及典故解析由 AI 辅助生成，仅供参考，重要出处请自行核验；输入内容可能发送至第三方模型服务进行处理。
+        </footer>
 
       </div>
     </div>

@@ -18,9 +18,9 @@ async function start() {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
   } else {
-    const dist = path.join(process.cwd(), "dist");
-    app.use((await import("express")).default.static(dist));
-    app.get("*", (_req, res) => res.sendFile(path.join(dist, "index.html")));
+    const publicDir = path.join(process.cwd(), "dist", "public");
+    app.use((await import("express")).default.static(publicDir));
+    app.get("*", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   }
 
   app.listen(PORT, "0.0.0.0", () => {

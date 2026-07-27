@@ -2,9 +2,17 @@
  * 共享 Express app —— 本地 dev (server.ts) 和 Vercel serverless (api/index.ts) 的单一源。
  * ponytail: 消除 server.ts 与 api/index.ts 的 280 行重复代码。
  */
-import express from "express";
+import express, {
+  type ErrorRequestHandler,
+  type NextFunction,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from "express";
 import crypto from "crypto";
 import OpenAI from "openai";
+import rateLimit from "express-rate-limit";
+import { z } from "zod";
 import { mockBatch1, mockShortlists } from "./data/mockData.ts";
 
 // ponytail: cnchar 懒加载——顶层 import 在 Vercel serverless 下崩溃，
@@ -26,6 +34,36 @@ async function ensureCnchar() {
 // ── 配置 ──
 
 const AI_MODEL = "glm-4.7";
+const AI_TIMEOUT_MS = 18_000;
+const BATCH_SIZE = 6;
+const SHORTLIST_SIZE = 3;
+const DEFAULT_RATE_LIMIT_MAX = 30;
+const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+
+export interface AppOptions {
+  rateLimitMax?: number;
+  rateLimitWindowMs?: number;
+}
+
+type AiFailureReason =
+  | "AI_NOT_CONFIGURED"
+  | "AI_TIMEOUT"
+  | "AI_RATE_LIMITED"
+  | "AI_AUTH_ERROR"
+  | "AI_INVALID_RESPONSE"
+  | "AI_PROVIDER_ERROR"
+  | "AI_RESULT_REJECTED";
+
+interface AiCallResult {
+  candidates: any[];
+  failureReason?: AiFailureReason;
+}
+
+interface GenerationMeta {
+  source: "ai" | "mixed" | "fallback";
+  degraded: boolean;
+  degradationReason?: AiFailureReason;
+}
 
 // ponytail: 懒加载——ESM import 提升，dotenv 在 app.ts 加载后才跑，
 // 模块级 const 会读到 undefined。延迟到首请求时创建。
@@ -36,7 +74,7 @@ function getAi(): OpenAI | null {
       ? new OpenAI({
           apiKey: process.env.GLM_API_KEY,
           baseURL: "https://open.bigmodel.cn/api/paas/v4",
-          timeout: 25000, // ponytail: 25s × 2(callWithRetry) = 50s < 60s Vercel 上限
+          timeout: AI_TIMEOUT_MS,
           maxRetries: 0,  // ponytail: 关 SDK 内置重试，由 callWithRetry 显式控制，避免叠加到 90s+
         })
       : null;
@@ -54,8 +92,101 @@ function parseAiJson(text: string): any[] {
   let s = text.trim();
   if (s.startsWith("```")) s = s.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
   const data = JSON.parse(s);
-  if (!data?.candidates) throw new Error("missing candidates");
+  if (!Array.isArray(data?.candidates)) throw new Error("missing candidates");
   return data.candidates;
+}
+
+const nonEmptyText = (max: number) => z.string().trim().min(1).max(max);
+const optionalText = (max: number) => z.string().trim().max(max).optional().default("");
+const optionalNullableText = (max: number) => z.string().trim().max(max).nullable().optional();
+const requestIdSchema = z.string().trim().min(1).max(100).optional();
+const surnameSchema = z.string()
+  .trim()
+  .min(1, "surname is required")
+  .max(2, "surname must contain at most 2 characters")
+  .regex(/^\p{Script=Han}+$/u, "surname must contain Chinese characters only");
+const expectationsSchema = z.array(nonEmptyText(30)).min(1).max(3);
+const refinementsSchema = z.array(nonEmptyText(30)).max(10);
+const candidateFeedbackSchema = z.object({
+  candidateId: nonEmptyText(100),
+  feedback: z.enum(["like", "neutral", "dislike"]),
+  reason: optionalNullableText(100),
+  name: z.string().trim().max(10).optional(),
+  meaning: z.string().trim().max(200).optional(),
+  origin: z.string().trim().max(200).optional(),
+}).strict();
+const candidateFeedbacksSchema = z.array(candidateFeedbackSchema).min(1).max(20);
+const excludeNamesSchema = z.array(nonEmptyText(10)).max(200).optional().default([]);
+
+const batch1RequestSchema = z.object({
+  surname: surnameSchema,
+  expectations: expectationsSchema,
+  additionalNote: optionalText(200),
+}).strict();
+
+const shortlistRequestSchema = z.object({
+  requestId: requestIdSchema,
+  surname: surnameSchema,
+  expectations: expectationsSchema,
+  additionalNote: optionalText(200),
+  candidateFeedbacks: candidateFeedbacksSchema,
+  refinements: refinementsSchema,
+  refinementNote: optionalText(200),
+  excludeNames: excludeNamesSchema,
+}).strict();
+
+const shortlistRefreshRequestSchema = z.object({
+  requestId: requestIdSchema,
+  shortlistRequestId: requestIdSchema,
+  surname: surnameSchema,
+  expectations: expectationsSchema,
+  additionalNote: optionalText(200),
+  candidateFeedbacks: candidateFeedbacksSchema,
+  refinements: refinementsSchema,
+  refinementNote: optionalText(200),
+  excludeCandidateNames: excludeNamesSchema,
+}).strict();
+
+const candidateOutputSchema = z.object({
+  name: nonEmptyText(10),
+  meaning: nonEmptyText(300),
+  origin: nonEmptyText(300),
+}).passthrough();
+
+const refinedCandidateOutputSchema = candidateOutputSchema.extend({
+  coreMeaning: nonEmptyText(50),
+  fitReason: nonEmptyText(500),
+  tip: z.string().max(300),
+}).passthrough();
+
+function parseRequest<T extends z.ZodType>(
+  schema: T,
+  req: Request,
+  res: Response,
+): z.output<T> | null {
+  const result = schema.safeParse(req.body);
+  if (result.success) return result.data;
+
+  const issue = result.error.issues[0];
+  const field = issue?.path.length ? `${issue.path.join(".")}: ` : "";
+  res.status(400).json({
+    error: "INVALID_REQUEST",
+    message: `${field}${issue?.message || "invalid request payload"}`,
+  });
+  return null;
+}
+
+function asyncRoute(
+  handler: (req: Request, res: Response, next: NextFunction) => Promise<void>,
+): RequestHandler {
+  return (req, res, next) => {
+    void handler(req, res, next).catch(next);
+  };
+}
+
+function positiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value || "", 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function tip(name: string): string {
@@ -84,14 +215,12 @@ function dedupe<T extends { name: string }>(arr: T[]): T[] {
   return arr.filter((c) => !seen.has(c.name) && seen.add(c.name));
 }
 
-/** ponytail: 合并 batch1 和 shortlist 的校验+归一化，用字段检查代替两个独立函数 */
-function normalize(raw: any[], surname: string, isShortlist: boolean): any[] {
-  const withId = dedupe(ensureSurname(withIds(raw), surname));
-  const ok = withId.length > 0 && withId.every((c) =>
-    c.name && c.meaning && c.origin &&
-    (!isShortlist || (c.coreMeaning && c.fitReason && typeof c.tip === "string"))
-  );
-  return ok ? withId : [];
+/** 校验并归一化模型输出；不可信的模型响应会进入 fallback。 */
+function normalize(raw: unknown, surname: string, isShortlist: boolean): any[] {
+  const schema = z.array(isShortlist ? refinedCandidateOutputSchema : candidateOutputSchema).min(1).max(20);
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) return [];
+  return dedupe(ensureSurname(withIds(parsed.data), surname));
 }
 
 /** ponytail: 合并两个 90% 相同的 prompt builder。batch-1 用 isBatch1 控制 */
@@ -147,9 +276,7 @@ ${fb || "无"}${likedNote}${exclude}
 
 // ── AI 调用 ──
 
-async function callAi(prompt: string, temp: number, maxTokens: number): Promise<any[]> {
-  const client = getAi();
-  if (!client) return [];
+async function callAi(client: OpenAI, prompt: string, temp: number, maxTokens: number): Promise<any[]> {
   const res = await client.chat.completions.create({
     model: AI_MODEL,
     messages: [{ role: "user", content: prompt }],
@@ -161,16 +288,60 @@ async function callAi(prompt: string, temp: number, maxTokens: number): Promise<
   return parseAiJson(res.choices[0]?.message?.content || "");
 }
 
-/** ponytail: 一个 retry helper 替代 3 处重复的 try/catch/retry */
-async function callWithRetry(prompt: string, temp: number, maxTokens: number): Promise<any[]> {
-  try {
-    const raw = await callAi(prompt, temp, maxTokens);
-    if (raw.length > 0) return raw;
-    return await callAi(prompt, temp, maxTokens); // 空结果重试一次
-  } catch (e) {
-    console.error("[ai]", e);
-    return [];
+function classifyAiError(error: unknown): { reason: AiFailureReason; retryable: boolean; status?: number } {
+  const value = error as { name?: string; message?: string; status?: number };
+  const status = value?.status;
+  const name = value?.name || "";
+  const message = value?.message || "";
+
+  if (status === 401 || status === 403) {
+    return { reason: "AI_AUTH_ERROR", retryable: false, status };
   }
+  if (status === 429) {
+    return { reason: "AI_RATE_LIMITED", retryable: false, status };
+  }
+  if (
+    name.includes("Timeout")
+    || name === "AbortError"
+    || message.toLowerCase().includes("timeout")
+  ) {
+    return { reason: "AI_TIMEOUT", retryable: true, status };
+  }
+  if (error instanceof SyntaxError || message === "missing candidates") {
+    return { reason: "AI_INVALID_RESPONSE", retryable: true, status };
+  }
+  return {
+    reason: "AI_PROVIDER_ERROR",
+    retryable: status === undefined || status >= 500,
+    status,
+  };
+}
+
+/** 只对可能恢复的错误重试一次，最大模型等待时间约 36 秒。 */
+async function callWithRetry(prompt: string, temp: number, maxTokens: number): Promise<AiCallResult> {
+  const client = getAi();
+  if (!client) {
+    return { candidates: [], failureReason: "AI_NOT_CONFIGURED" };
+  }
+
+  let failureReason: AiFailureReason = "AI_INVALID_RESPONSE";
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const candidates = await callAi(client, prompt, temp, maxTokens);
+      if (candidates.length > 0) return { candidates };
+      failureReason = "AI_INVALID_RESPONSE";
+    } catch (error) {
+      const failure = classifyAiError(error);
+      failureReason = failure.reason;
+      console.error("[ai]", {
+        attempt,
+        reason: failure.reason,
+        status: failure.status,
+      });
+      if (!failure.retryable) break;
+    }
+  }
+  return { candidates: [], failureReason };
 }
 
 // ── 后处理 ──
@@ -184,102 +355,174 @@ function mergeLiked(candidates: any[], likedFb: any[], surname: string, ref: str
   const likedNames = new Set(likedFb.map((f) => f.name || ""));
   const liked = likedFb.map((f) => {
     const name = f.name?.startsWith(surname) ? f.name : surname + (f.name || "");
+    const meaning = (f.meaning || "").replace(/[。！？!?]+$/u, "");
     return {
       id: `liked-${f.candidateId}`, name, meaning: f.meaning || "", origin: f.origin || "",
       coreMeaning: "经典佳名",
-      fitReason: `出自"${f.origin || "经典典故"}"，${f.meaning}。结合"${ref[0] || "整体气质"}"非常契合。`,
+      fitReason: `出自"${f.origin || "经典典故"}"，${meaning}。结合"${ref[0] || "整体气质"}"非常契合。`,
       tip: tip(name),
     };
   }).filter(Boolean);
   return [...liked, ...candidates.filter((c) => !likedNames.has(c.name))].slice(0, Math.max(3, liked.length));
 }
 
-function fallbackBatch1(): any[] {
-  return mockBatch1.map((c) => ({ ...c, id: crypto.randomUUID() }));
+function adaptMockSurname<T extends { name: string }>(candidate: T, surname: string): T {
+  return { ...candidate, name: surname + candidate.name.slice(1) };
 }
 
-function fallbackShortlist(): any[] {
-  return mockShortlists[0].map((c) => ({ ...c, id: crypto.randomUUID() }));
+function fallbackBatch1(surname: string): any[] {
+  return mockBatch1
+    .map((candidate) => ({
+      ...adaptMockSurname(candidate, surname),
+      id: crypto.randomUUID(),
+    }))
+    .slice(0, BATCH_SIZE);
+}
+
+function fallbackShortlist(surname: string, exclude: Set<string>): any[] {
+  return mockShortlists
+    .flat()
+    .map((candidate) => ({
+      ...adaptMockSurname(candidate, surname),
+      id: crypto.randomUUID(),
+    }))
+    .filter((candidate) => !exclude.has(candidate.name));
+}
+
+function fillCandidates(primary: any[], fallback: any[], target: number): any[] {
+  return dedupe([...primary, ...fallback]).slice(0, target);
+}
+
+function generationMeta(
+  acceptedAiCount: number,
+  usedFallback: boolean,
+  failureReason?: AiFailureReason,
+): GenerationMeta {
+  if (!usedFallback) return { source: "ai", degraded: false };
+  return {
+    source: acceptedAiCount > 0 ? "mixed" : "fallback",
+    degraded: true,
+    degradationReason: failureReason || "AI_RESULT_REJECTED",
+  };
 }
 
 // ── Express app ──
 
-export function createApp() {
+export function createApp(options: AppOptions = {}) {
   const app = express();
-  app.use(express.json());
+  app.disable("x-powered-by");
+  app.set("trust proxy", 1);
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    next();
+  });
+  app.use(express.json({ limit: "16kb", strict: true }));
 
-  app.post("/api/naming/batch-1", async (req, res) => {
-    const { surname, expectations, additionalNote } = req.body;
-    if (!surname || !Array.isArray(expectations) || !expectations.length) {
-      res.status(400).json({ error: "INVALID_REQUEST", message: "surname and expectations are required" });
-      return;
-    }
+  const namingLimiter = rateLimit({
+    windowMs: options.rateLimitWindowMs
+      ?? positiveInt(process.env.NAMING_RATE_LIMIT_WINDOW_MS, DEFAULT_RATE_LIMIT_WINDOW_MS),
+    limit: options.rateLimitMax
+      ?? positiveInt(process.env.NAMING_RATE_LIMIT_MAX, DEFAULT_RATE_LIMIT_MAX),
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    handler: (_req, res) => {
+      res.status(429).json({
+        error: "RATE_LIMITED",
+        message: "too many naming requests, please try again later",
+      });
+    },
+  });
+  app.use("/api/naming", namingLimiter);
+
+  app.post("/api/naming/batch-1", asyncRoute(async (req, res) => {
+    const input = parseRequest(batch1RequestSchema, req, res);
+    if (!input) return;
+    const { surname, expectations, additionalNote } = input;
 
     const requestId = crypto.randomUUID();
 
-    let candidates = normalize(
-      await callWithRetry(
-        buildPrompt({ surname, expectations, feedbacks: [], refinements: [], note: additionalNote || "", isBatch1: true }),
-        0.8, 800
-      ), surname, false
+    const aiResult = await callWithRetry(
+      buildPrompt({ surname, expectations, feedbacks: [], refinements: [], note: additionalNote || "", isBatch1: true }),
+      0.8, 800
     );
-    if (candidates.length === 0) candidates = fallbackBatch1();
+    const aiCandidates = normalize(aiResult.candidates, surname, false).slice(0, BATCH_SIZE);
+    const usedFallback = aiCandidates.length < BATCH_SIZE;
+    const candidates = fillCandidates(aiCandidates, fallbackBatch1(surname), BATCH_SIZE);
+    const meta = generationMeta(aiCandidates.length, usedFallback, aiResult.failureReason);
 
     console.log(`[batch-1] rid=${requestId.slice(0, 8)} count=${candidates.length}`);
-    res.json({ requestId, candidates });
-  });
+    res.json({ requestId, candidates, ...meta });
+  }));
 
-  app.post("/api/naming/shortlist", async (req, res) => {
-    const { requestId, surname, expectations, candidateFeedbacks, refinements, refinementNote, additionalNote, excludeNames } = req.body;
-    if (!surname || !Array.isArray(expectations) || !expectations.length || !Array.isArray(candidateFeedbacks) || !Array.isArray(refinements)) {
-      res.status(400).json({ error: "INVALID_REQUEST", message: "surname, expectations, candidateFeedbacks, refinements are required" });
-      return;
-    }
+  app.post("/api/naming/shortlist", asyncRoute(async (req, res) => {
+    const input = parseRequest(shortlistRequestSchema, req, res);
+    if (!input) return;
+    const {
+      surname, expectations, candidateFeedbacks, refinements,
+      refinementNote, additionalNote, excludeNames,
+    } = input;
 
     const shortlistId = crypto.randomUUID();
     const likedFb = candidateFeedbacks.filter((f: any) => f.feedback === "like");
+    const exclude = new Set(excludeNames);
+    likedFb.forEach((f) => exclude.delete(f.name || ""));
 
     // additionalNote（第一步补充）和 refinementNote（第三步微调）合并传入 prompt
     const combinedNote = [additionalNote, refinementNote].filter(Boolean).join("；");
-    let candidates = normalize(
-      await callWithRetry(
-        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: combinedNote, excludeNames }),
-        0.7, 1000
-      ), surname, true
+    const aiResult = await callWithRetry(
+      buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: combinedNote, excludeNames }),
+      0.7, 1000
     );
-    if (candidates.length === 0) candidates = fallbackShortlist();
+    const aiCandidates = normalize(aiResult.candidates, surname, true)
+      .filter((candidate) => !exclude.has(candidate.name))
+      .slice(0, SHORTLIST_SIZE);
+    const usedFallback = aiCandidates.length < SHORTLIST_SIZE;
+    let candidates = fillCandidates(
+      aiCandidates,
+      fallbackShortlist(surname, exclude),
+      SHORTLIST_SIZE,
+    );
+    const meta = generationMeta(aiCandidates.length, usedFallback, aiResult.failureReason);
 
     await ensureCnchar();
     candidates = applyTip(candidates);
     candidates = mergeLiked(candidates, likedFb, surname, refinements);
     console.log(`[shortlist] rid=${shortlistId.slice(0, 8)} count=${candidates.length}`);
-    res.json({ shortlistRequestId: shortlistId, candidates });
-  });
+    res.json({ shortlistRequestId: shortlistId, candidates, ...meta });
+  }));
 
-  app.post("/api/naming/shortlist/refresh", async (req, res) => {
-    const { shortlistRequestId: prevId, surname, expectations, candidateFeedbacks, refinements, refinementNote, additionalNote, excludeCandidateNames } = req.body;
-    if (!surname || !Array.isArray(expectations) || !expectations.length || !Array.isArray(candidateFeedbacks) || !Array.isArray(refinements)) {
-      res.status(400).json({ error: "INVALID_REQUEST", message: "surname, expectations, candidateFeedbacks, refinements are required" });
-      return;
-    }
+  app.post("/api/naming/shortlist/refresh", asyncRoute(async (req, res) => {
+    const input = parseRequest(shortlistRefreshRequestSchema, req, res);
+    if (!input) return;
+    const {
+      surname, expectations, candidateFeedbacks, refinements,
+      refinementNote, additionalNote, excludeCandidateNames,
+    } = input;
+
     // ponytail: 去重完全由前端 shownNames 驱动，不依赖 sessionStore（serverless 无状态）
-    const exclude = new Set<string>(Array.isArray(excludeCandidateNames) ? excludeCandidateNames : []);
+    const exclude = new Set<string>(excludeCandidateNames);
     const likedFb = candidateFeedbacks.filter((f: any) => f.feedback === "like");
     likedFb.forEach((f: any) => exclude.delete(f.name || ""));
 
     // additionalNote（第一步补充）和 refinementNote（第三步微调）合并传入 prompt
     const combinedNote = [additionalNote, refinementNote].filter(Boolean).join("；");
-    let candidates = normalize(
-      await callWithRetry(
-        buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: combinedNote, excludeNames: [...exclude], isRefresh: true }),
-        0.7, 1000
-      ), surname, true
-    ).filter((c) => !exclude.has(c.name));
-
-    // AI 结果为空时先 fallback，再过滤已展示名字，避免过早返回 NO_MORE_CANDIDATES
-    if (candidates.length === 0) {
-      candidates = fallbackShortlist().filter((c) => !exclude.has(c.name));
-    }
+    const aiResult = await callWithRetry(
+      buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: combinedNote, excludeNames: [...exclude], isRefresh: true }),
+      0.7, 1000
+    );
+    const aiCandidates = normalize(aiResult.candidates, surname, true)
+      .filter((candidate) => !exclude.has(candidate.name))
+      .slice(0, SHORTLIST_SIZE);
+    const usedFallback = aiCandidates.length < SHORTLIST_SIZE;
+    let candidates = fillCandidates(
+      aiCandidates,
+      fallbackShortlist(surname, exclude),
+      SHORTLIST_SIZE,
+    );
+    const meta = generationMeta(aiCandidates.length, usedFallback, aiResult.failureReason);
 
     if (candidates.length === 0) {
       res.status(400).json({ error: "NO_MORE_CANDIDATES", message: "no more candidates available under current constraints" });
@@ -291,8 +534,33 @@ export function createApp() {
     candidates = mergeLiked(candidates, likedFb, surname, refinements);
     const shortlistId = crypto.randomUUID();
     console.log(`[refresh] rid=${shortlistId.slice(0, 8)} count=${candidates.length}`);
-    res.json({ shortlistRequestId: shortlistId, candidates });
-  });
+    res.json({ shortlistRequestId: shortlistId, candidates, ...meta });
+  }));
+
+  const errorHandler: ErrorRequestHandler = (error, req, res, next) => {
+    if (res.headersSent) {
+      next(error);
+      return;
+    }
+
+    const bodyError = error as { type?: string; status?: number; message?: string };
+    if (bodyError.type === "entity.too.large") {
+      res.status(413).json({ error: "INVALID_REQUEST", message: "request body is too large" });
+      return;
+    }
+    if (bodyError.type === "entity.parse.failed" || bodyError.status === 400) {
+      res.status(400).json({ error: "INVALID_REQUEST", message: "invalid JSON body" });
+      return;
+    }
+
+    console.error("[server]", {
+      method: req.method,
+      path: req.path,
+      message: bodyError.message || "unknown error",
+    });
+    res.status(500).json({ error: "INTERNAL_ERROR", message: "internal server error" });
+  };
+  app.use(errorHandler);
 
   return app;
 }
