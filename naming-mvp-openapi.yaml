@@ -185,7 +185,8 @@ components:
           examples: ["req_batch1_xxx"]
         candidates:
           type: array
-          minItems: 1
+          minItems: 6
+          maxItems: 6
           items:
             $ref: "#/components/schemas/Candidate"
         source:
@@ -218,7 +219,7 @@ components:
         origin:
           type: string
           description: Lightweight origin or imagery note
-          examples: ["意象偏向清雅与和顺。"]
+          examples: ["取意于清雅与和顺的意象。"]
 
     CandidateFeedback:
       type: object
@@ -249,7 +250,7 @@ components:
         origin:
           type: string
           description: Optional candidate origin carried from the first-batch card
-          examples: ["意象偏向清雅与和顺。"]
+          examples: ["取意于清雅与和顺的意象。"]
 
     FeedbackType:
       type: string
@@ -378,6 +379,7 @@ components:
         candidates:
           type: array
           minItems: 1
+          maxItems: 3
           items:
             $ref: "#/components/schemas/RefinedCandidate"
         source:
@@ -411,24 +413,38 @@ components:
         - AI_RESULT_REJECTED
 
     RefinedCandidate:
-      allOf:
-        - $ref: "#/components/schemas/Candidate"
-        - type: object
-          additionalProperties: false
-          required:
-            - coreMeaning
-            - fitReason
-            - tip
-          properties:
-            coreMeaning:
-              type: string
-              examples: ["修养自身，目光深远"]
-            fitReason:
-              type: string
-              examples: ["更贴近你强调的“稳”和“志向感”。"]
-            tip:
-              type: string
-              examples: ["名字声调平缓，不算冷僻。"]
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - meaning
+        - origin
+        - coreMeaning
+        - fitReason
+        - tip
+      properties:
+        id:
+          type: string
+          examples: ["c1"]
+        name:
+          type: string
+          examples: ["林修远"]
+        meaning:
+          type: string
+          examples: ["有志向、懂节制，兼具书卷气与广度。"]
+        origin:
+          type: string
+          examples: ["取意于修身致远的古典意象。"]
+        coreMeaning:
+          type: string
+          examples: ["修养自身，目光深远"]
+        fitReason:
+          type: string
+          examples: ["更贴近你强调的“稳”和“志向感”。"]
+        tip:
+          type: string
+          examples: ["名字声调平缓，不算冷僻。"]
 
     ErrorResponse:
       type: object

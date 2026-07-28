@@ -17,12 +17,17 @@ import { mockBatch1, mockShortlists } from "./data/mockData.ts";
 
 // ponytail: cnchar 懒加载——顶层 import 在 Vercel serverless 下崩溃，
 // 延迟到首次调用 tip() 时加载。
-let _cnchar: any = null;
+interface CncharApi {
+  spell(name: string, mode: "array", tone: "tone"): string[];
+  stroke(character: string): number;
+}
+
+let _cnchar: CncharApi | false | null = null;
 async function ensureCnchar() {
   if (_cnchar !== null) return;
   try {
     const mod = await import("cnchar");
-    _cnchar = mod.default;
+    _cnchar = mod.default as CncharApi;
     // @ts-ignore — cnchar 插件无类型声明
     await import("cnchar-poly");
   } catch (e) {
@@ -43,6 +48,9 @@ const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 export interface AppOptions {
   rateLimitMax?: number;
   rateLimitWindowMs?: number;
+  aiClient?: OpenAI | null;
+  onMetric?: (metric: NamingMetric) => void;
+  trustProxy?: boolean;
 }
 
 type AiFailureReason =
@@ -55,14 +63,40 @@ type AiFailureReason =
   | "AI_RESULT_REJECTED";
 
 interface AiCallResult {
-  candidates: any[];
+  candidates: unknown[];
   failureReason?: AiFailureReason;
+  attemptCount: number;
 }
 
 interface GenerationMeta {
   source: "ai" | "mixed" | "fallback";
   degraded: boolean;
   degradationReason?: AiFailureReason;
+}
+
+export interface NamingMetric {
+  event: "naming_request";
+  endpoint: string;
+  method: string;
+  status: number;
+  durationMs: number;
+  requestId?: string;
+  source?: GenerationMeta["source"];
+  degraded?: boolean;
+  degradationReason?: AiFailureReason;
+  aiAttemptCount?: number;
+  acceptedAiCandidateCount?: number;
+  fallbackCandidateCount?: number;
+}
+
+interface GenerationMetricFields {
+  requestId: string;
+  source: GenerationMeta["source"];
+  degraded: boolean;
+  degradationReason?: AiFailureReason;
+  aiAttemptCount: number;
+  acceptedAiCandidateCount: number;
+  fallbackCandidateCount: number;
 }
 
 // ponytail: 懒加载——ESM import 提升，dotenv 在 app.ts 加载后才跑，
@@ -88,7 +122,7 @@ function sanitize(input: string): string {
   return input.replace(/[\r\n\t]/g, " ").replace(/[^\S ]/g, "").trim().slice(0, 200);
 }
 
-function parseAiJson(text: string): any[] {
+function parseAiJson(text: string): unknown[] {
   let s = text.trim();
   if (s.startsWith("```")) s = s.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
   const data = JSON.parse(s);
@@ -151,13 +185,20 @@ const candidateOutputSchema = z.object({
   name: nonEmptyText(10),
   meaning: nonEmptyText(300),
   origin: nonEmptyText(300),
-}).passthrough();
+});
 
 const refinedCandidateOutputSchema = candidateOutputSchema.extend({
   coreMeaning: nonEmptyText(50),
   fitReason: nonEmptyText(500),
   tip: z.string().max(300),
-}).passthrough();
+});
+
+type CandidateOutput = z.output<typeof candidateOutputSchema>;
+type RefinedCandidateOutput = z.output<typeof refinedCandidateOutputSchema>;
+type CandidateWithId = CandidateOutput & { id: string };
+type RefinedCandidateWithId = RefinedCandidateOutput & { id: string };
+type CandidateFeedback = z.output<typeof candidateFeedbackSchema>;
+type PreservedFeedback = CandidateFeedback & { name: string };
 
 function parseRequest<T extends z.ZodType>(
   schema: T,
@@ -189,12 +230,20 @@ function positiveInt(value: string | undefined, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function shouldTrustProxy(options: AppOptions): boolean {
+  if (typeof options.trustProxy === "boolean") return options.trustProxy;
+  if (process.env.TRUST_PROXY === "true") return true;
+  if (process.env.TRUST_PROXY === "false") return false;
+  return process.env.VERCEL === "1";
+}
+
 function tip(name: string): string {
-  if (!_cnchar) return "";
+  const cnchar = _cnchar;
+  if (!cnchar) return "";
   try {
     const chars = name.split("");
-    const py = _cnchar.spell(name, "array", "tone") as string[];
-    const strokes = chars.map((c) => _cnchar.stroke(c) as number);
+    const py = cnchar.spell(name, "array", "tone");
+    const strokes = chars.map((c) => cnchar.stroke(c));
     const total = strokes.reduce((a, b) => a + b, 0);
     return `读音 ${py.join(" ")}｜笔画 ${chars.map((c, i) => `${c}${strokes[i]}`).join(" ")}（共${total}画）`;
   } catch {
@@ -206,8 +255,29 @@ function withIds<T>(arr: T[]): (T & { id: string })[] {
   return arr.map((c) => ({ ...c, id: crypto.randomUUID() }));
 }
 
-function ensureSurname<T extends { name: string }>(arr: T[], surname: string): T[] {
-  return arr.map((c) => (c.name.startsWith(surname) ? c : { ...c, name: surname + c.name }));
+function isValidFullName(name: string, surname: string): boolean {
+  return name.startsWith(surname)
+    && name.length > surname.length
+    && name.length <= 6
+    && /^\p{Script=Han}+$/u.test(name);
+}
+
+const prohibitedContentPattern = /完美契合|完美满足|唯一最佳|保证/;
+
+function isTransparentOrigin(origin: string): boolean {
+  if (/(出自|源自|见于)/u.test(origin)) return false;
+  return /(取意|意象|字义|字意|化用)/u.test(origin);
+}
+
+function hasProhibitedContent(candidate: {
+  meaning: string;
+  origin: string;
+  coreMeaning?: string;
+  fitReason?: string;
+}): boolean {
+  return [candidate.meaning, candidate.origin, candidate.coreMeaning, candidate.fitReason]
+    .filter((value): value is string => typeof value === "string")
+    .some((value) => prohibitedContentPattern.test(value));
 }
 
 function dedupe<T extends { name: string }>(arr: T[]): T[] {
@@ -216,16 +286,23 @@ function dedupe<T extends { name: string }>(arr: T[]): T[] {
 }
 
 /** 校验并归一化模型输出；不可信的模型响应会进入 fallback。 */
-function normalize(raw: unknown, surname: string, isShortlist: boolean): any[] {
-  const schema = z.array(isShortlist ? refinedCandidateOutputSchema : candidateOutputSchema).min(1).max(20);
-  const parsed = schema.safeParse(raw);
+function normalize<T extends CandidateOutput>(
+  raw: unknown,
+  surname: string,
+  candidateSchema: z.ZodType<T>,
+): (T & { id: string })[] {
+  const parsed = z.array(candidateSchema).min(1).max(20).safeParse(raw);
   if (!parsed.success) return [];
-  return dedupe(ensureSurname(withIds(parsed.data), surname));
+  return dedupe(withIds(parsed.data.filter((candidate) => (
+    isValidFullName(candidate.name, surname)
+    && isTransparentOrigin(candidate.origin)
+    && !hasProhibitedContent(candidate)
+  ))));
 }
 
 /** ponytail: 合并两个 90% 相同的 prompt builder。batch-1 用 isBatch1 控制 */
 function buildPrompt(opts: {
-  surname: string; expectations: string[]; feedbacks: any[];
+  surname: string; expectations: string[]; feedbacks: CandidateFeedback[];
   refinements: string[]; note: string; excludeNames?: string[]; isBatch1?: boolean; isRefresh?: boolean;
 }): string {
   const surname = sanitize(opts.surname);
@@ -238,7 +315,9 @@ function buildPrompt(opts: {
 名字传达的感受：${exp}
 补充说明：${opts.note ? sanitize(opts.note) : "无"}
 
-返回 JSON: {"candidates":[{"name":"全名","meaning":"约20字寓意","origin":"出处，如诗词古籍或意象"}]}`;
+来源说明规则：统一写作“取意于……意象”“取……字义”或“化用……意象”；不得使用“出自”“源自”“见于”或编造出处。不得使用“完美契合”“唯一最佳”“保证”等绝对化表述。
+
+返回 JSON: {"candidates":[{"name":"全名","meaning":"约20字寓意","origin":"取意说明"}]}`;
   }
 
   const ref = opts.refinements.map(sanitize).join("、");
@@ -246,12 +325,12 @@ function buildPrompt(opts: {
 
   const fb = opts.feedbacks.map((f) => {
     const label = f.feedback === "like" ? "喜欢" : f.feedback === "dislike" ? "不喜欢" : "一般";
-    return `- 名字"${sanitize(f.name || "")}"（寓意：${sanitize(f.meaning || "")}，出处：${sanitize(f.origin || "")}），用户感觉：${label}（补充：${f.reason ? sanitize(f.reason) : "无"}）`;
+    return `- 名字"${sanitize(f.name || "")}"（寓意：${sanitize(f.meaning || "")}，取意说明：${sanitize(f.origin || "")}），用户感觉：${label}（补充：${f.reason ? sanitize(f.reason) : "无"}）`;
   }).join("\n");
 
   const liked = opts.feedbacks.filter((f) => f.feedback === "like");
   const likedNote = liked.length > 0
-    ? `\n**特别注意**：用户喜欢 ${liked.map((n) => sanitize(n.name || "")).join("、")}，务必原样保留在结果中。对这些名字的 fitReason 必须结合出处典故和微调方向(${ref})深入分析，不要套话。`
+    ? `\n**特别注意**：用户喜欢 ${liked.map((n) => sanitize(n.name || "")).join("、")}，务必原样保留在结果中。对这些名字的 fitReason 必须结合取意说明和微调方向(${ref})深入分析，不要套话。`
     : "";
 
   const exclude = opts.excludeNames?.length
@@ -271,12 +350,14 @@ function buildPrompt(opts: {
 用户反馈：
 ${fb || "无"}${likedNote}${exclude}
 
-返回 JSON: {"candidates":[{"name":"全名","meaning":"一句话寓意","origin":"出处","coreMeaning":"4-8字核心标签","fitReason":"50-80字深入分析为何契合","tip":""}]}`;
+来源说明规则：统一写作“取意于……意象”“取……字义”或“化用……意象”；不得使用“出自”“源自”“见于”或编造出处。不得使用“完美契合”“唯一最佳”“保证”等绝对化表述。
+
+返回 JSON: {"candidates":[{"name":"全名","meaning":"一句话寓意","origin":"取意说明","coreMeaning":"4-8字核心标签","fitReason":"50-80字深入分析为何契合","tip":""}]}`;
 }
 
 // ── AI 调用 ──
 
-async function callAi(client: OpenAI, prompt: string, temp: number, maxTokens: number): Promise<any[]> {
+async function callAi(client: OpenAI, prompt: string, temp: number, maxTokens: number): Promise<unknown[]> {
   const res = await client.chat.completions.create({
     model: AI_MODEL,
     messages: [{ role: "user", content: prompt }],
@@ -318,17 +399,22 @@ function classifyAiError(error: unknown): { reason: AiFailureReason; retryable: 
 }
 
 /** 只对可能恢复的错误重试一次，最大模型等待时间约 36 秒。 */
-async function callWithRetry(prompt: string, temp: number, maxTokens: number): Promise<AiCallResult> {
-  const client = getAi();
+async function callWithRetry(
+  prompt: string,
+  temp: number,
+  maxTokens: number,
+  clientOverride?: OpenAI | null,
+): Promise<AiCallResult> {
+  const client = clientOverride === undefined ? getAi() : clientOverride;
   if (!client) {
-    return { candidates: [], failureReason: "AI_NOT_CONFIGURED" };
+    return { candidates: [], failureReason: "AI_NOT_CONFIGURED", attemptCount: 0 };
   }
 
   let failureReason: AiFailureReason = "AI_INVALID_RESPONSE";
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       const candidates = await callAi(client, prompt, temp, maxTokens);
-      if (candidates.length > 0) return { candidates };
+      if (candidates.length > 0) return { candidates, attemptCount: attempt };
       failureReason = "AI_INVALID_RESPONSE";
     } catch (error) {
       const failure = classifyAiError(error);
@@ -341,36 +427,41 @@ async function callWithRetry(prompt: string, temp: number, maxTokens: number): P
       if (!failure.retryable) break;
     }
   }
-  return { candidates: [], failureReason };
+  return { candidates: [], failureReason, attemptCount: 2 };
 }
 
 // ── 后处理 ──
 
-function applyTip(candidates: any[]) {
+function applyTip(candidates: RefinedCandidateWithId[]): RefinedCandidateWithId[] {
   return candidates.map((c) => ({ ...c, tip: tip(c.name) }));
 }
 
-function mergeLiked(candidates: any[], likedFb: any[], surname: string, ref: string[]) {
+function mergeLiked(
+  candidates: RefinedCandidateWithId[],
+  likedFb: PreservedFeedback[],
+  surname: string,
+  ref: string[],
+): RefinedCandidateWithId[] {
   if (likedFb.length === 0) return candidates;
   const likedNames = new Set(likedFb.map((f) => f.name || ""));
-  const liked = likedFb.map((f) => {
+  const liked: RefinedCandidateWithId[] = likedFb.map((f) => {
     const name = f.name?.startsWith(surname) ? f.name : surname + (f.name || "");
     const meaning = (f.meaning || "").replace(/[。！？!?]+$/u, "");
     return {
       id: `liked-${f.candidateId}`, name, meaning: f.meaning || "", origin: f.origin || "",
       coreMeaning: "经典佳名",
-      fitReason: `出自"${f.origin || "经典典故"}"，${meaning}。结合"${ref[0] || "整体气质"}"非常契合。`,
+      fitReason: `取意说明：“${f.origin || "待补充"}”。${meaning}与“${ref[0] || "整体气质"}”的方向相呼应。`,
       tip: tip(name),
     };
   }).filter(Boolean);
-  return [...liked, ...candidates.filter((c) => !likedNames.has(c.name))].slice(0, Math.max(3, liked.length));
+  return [...liked, ...candidates.filter((c) => !likedNames.has(c.name))].slice(0, SHORTLIST_SIZE);
 }
 
 function adaptMockSurname<T extends { name: string }>(candidate: T, surname: string): T {
   return { ...candidate, name: surname + candidate.name.slice(1) };
 }
 
-function fallbackBatch1(surname: string): any[] {
+function fallbackBatch1(surname: string): CandidateWithId[] {
   return mockBatch1
     .map((candidate) => ({
       ...adaptMockSurname(candidate, surname),
@@ -379,7 +470,7 @@ function fallbackBatch1(surname: string): any[] {
     .slice(0, BATCH_SIZE);
 }
 
-function fallbackShortlist(surname: string, exclude: Set<string>): any[] {
+function fallbackShortlist(surname: string, exclude: Set<string>): RefinedCandidateWithId[] {
   return mockShortlists
     .flat()
     .map((candidate) => ({
@@ -389,7 +480,7 @@ function fallbackShortlist(surname: string, exclude: Set<string>): any[] {
     .filter((candidate) => !exclude.has(candidate.name));
 }
 
-function fillCandidates(primary: any[], fallback: any[], target: number): any[] {
+function fillCandidates<T extends { name: string }>(primary: T[], fallback: T[], target: number): T[] {
   return dedupe([...primary, ...fallback]).slice(0, target);
 }
 
@@ -406,12 +497,31 @@ function generationMeta(
   };
 }
 
+function setGenerationMetric(res: Response, fields: GenerationMetricFields) {
+  res.locals.namingGenerationMetric = fields;
+}
+
+function emitMetric(options: AppOptions, metric: NamingMetric) {
+  try {
+    if (options.onMetric) {
+      options.onMetric(metric);
+      return;
+    }
+    if (process.env.NAMING_TELEMETRY_ENABLED !== "false") {
+      console.info(JSON.stringify(metric));
+    }
+  } catch {
+    console.error("[telemetry] metric sink failed");
+  }
+}
+
 // ── Express app ──
 
 export function createApp(options: AppOptions = {}) {
   const app = express();
+  const trustProxy = shouldTrustProxy(options);
   app.disable("x-powered-by");
-  app.set("trust proxy", 1);
+  app.set("trust proxy", trustProxy ? 1 : false);
   app.use((_req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
@@ -421,6 +531,23 @@ export function createApp(options: AppOptions = {}) {
   });
   app.use(express.json({ limit: "16kb", strict: true }));
 
+  app.use("/api/naming", (req, res, next) => {
+    const startedAt = Date.now();
+    const endpoint = `${req.baseUrl}${req.path}`;
+    res.once("finish", () => {
+      const generation = res.locals.namingGenerationMetric as GenerationMetricFields | undefined;
+      emitMetric(options, {
+        event: "naming_request",
+        endpoint,
+        method: req.method,
+        status: res.statusCode,
+        durationMs: Date.now() - startedAt,
+        ...generation,
+      });
+    });
+    next();
+  });
+
   const namingLimiter = rateLimit({
     windowMs: options.rateLimitWindowMs
       ?? positiveInt(process.env.NAMING_RATE_LIMIT_WINDOW_MS, DEFAULT_RATE_LIMIT_WINDOW_MS),
@@ -428,6 +555,7 @@ export function createApp(options: AppOptions = {}) {
       ?? positiveInt(process.env.NAMING_RATE_LIMIT_MAX, DEFAULT_RATE_LIMIT_MAX),
     standardHeaders: "draft-8",
     legacyHeaders: false,
+    validate: { xForwardedForHeader: trustProxy },
     handler: (_req, res) => {
       res.status(429).json({
         error: "RATE_LIMITED",
@@ -446,12 +574,20 @@ export function createApp(options: AppOptions = {}) {
 
     const aiResult = await callWithRetry(
       buildPrompt({ surname, expectations, feedbacks: [], refinements: [], note: additionalNote || "", isBatch1: true }),
-      0.8, 800
+      0.8, 800, options.aiClient,
     );
-    const aiCandidates = normalize(aiResult.candidates, surname, false).slice(0, BATCH_SIZE);
+    const aiCandidates = normalize(aiResult.candidates, surname, candidateOutputSchema).slice(0, BATCH_SIZE);
     const usedFallback = aiCandidates.length < BATCH_SIZE;
     const candidates = fillCandidates(aiCandidates, fallbackBatch1(surname), BATCH_SIZE);
     const meta = generationMeta(aiCandidates.length, usedFallback, aiResult.failureReason);
+
+    setGenerationMetric(res, {
+      requestId,
+      ...meta,
+      aiAttemptCount: aiResult.attemptCount,
+      acceptedAiCandidateCount: aiCandidates.length,
+      fallbackCandidateCount: Math.max(0, candidates.length - aiCandidates.length),
+    });
 
     console.log(`[batch-1] rid=${requestId.slice(0, 8)} count=${candidates.length}`);
     res.json({ requestId, candidates, ...meta });
@@ -466,17 +602,27 @@ export function createApp(options: AppOptions = {}) {
     } = input;
 
     const shortlistId = crypto.randomUUID();
-    const likedFb = candidateFeedbacks.filter((f: any) => f.feedback === "like");
+    const likedFb = candidateFeedbacks.filter((feedback) => feedback.feedback === "like");
+    if (likedFb.length > SHORTLIST_SIZE) {
+      res.status(400).json({
+        error: "INVALID_REQUEST",
+        message: `at most ${SHORTLIST_SIZE} liked candidates can be preserved`,
+      });
+      return;
+    }
+    const preservedLiked = likedFb.filter(
+      (feedback): feedback is PreservedFeedback => !!feedback.name && isValidFullName(feedback.name, surname),
+    );
     const exclude = new Set(excludeNames);
-    likedFb.forEach((f) => exclude.delete(f.name || ""));
+    preservedLiked.forEach((f) => exclude.delete(f.name));
 
     // additionalNote（第一步补充）和 refinementNote（第三步微调）合并传入 prompt
     const combinedNote = [additionalNote, refinementNote].filter(Boolean).join("；");
     const aiResult = await callWithRetry(
       buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: combinedNote, excludeNames }),
-      0.7, 1000
+      0.7, 1000, options.aiClient,
     );
-    const aiCandidates = normalize(aiResult.candidates, surname, true)
+    const aiCandidates = normalize(aiResult.candidates, surname, refinedCandidateOutputSchema)
       .filter((candidate) => !exclude.has(candidate.name))
       .slice(0, SHORTLIST_SIZE);
     const usedFallback = aiCandidates.length < SHORTLIST_SIZE;
@@ -486,10 +632,22 @@ export function createApp(options: AppOptions = {}) {
       SHORTLIST_SIZE,
     );
     const meta = generationMeta(aiCandidates.length, usedFallback, aiResult.failureReason);
+    const fallbackCandidateCount = Math.max(0, candidates.length - aiCandidates.length);
 
     await ensureCnchar();
     candidates = applyTip(candidates);
-    candidates = mergeLiked(candidates, likedFb, surname, refinements);
+    candidates = mergeLiked(candidates, preservedLiked, surname, refinements);
+    setGenerationMetric(res, {
+      requestId: shortlistId,
+      ...meta,
+      aiAttemptCount: aiResult.attemptCount,
+      acceptedAiCandidateCount: aiCandidates.length,
+      fallbackCandidateCount,
+    });
+    if (candidates.length === 0) {
+      res.status(400).json({ error: "NO_MORE_CANDIDATES", message: "no candidates available under current constraints" });
+      return;
+    }
     console.log(`[shortlist] rid=${shortlistId.slice(0, 8)} count=${candidates.length}`);
     res.json({ shortlistRequestId: shortlistId, candidates, ...meta });
   }));
@@ -501,19 +659,30 @@ export function createApp(options: AppOptions = {}) {
       surname, expectations, candidateFeedbacks, refinements,
       refinementNote, additionalNote, excludeCandidateNames,
     } = input;
+    const refreshRequestId = crypto.randomUUID();
 
     // ponytail: 去重完全由前端 shownNames 驱动，不依赖 sessionStore（serverless 无状态）
+    const likedFb = candidateFeedbacks.filter((feedback) => feedback.feedback === "like");
+    if (likedFb.length > SHORTLIST_SIZE) {
+      res.status(400).json({
+        error: "INVALID_REQUEST",
+        message: `at most ${SHORTLIST_SIZE} liked candidates can be preserved`,
+      });
+      return;
+    }
+    const preservedLiked = likedFb.filter(
+      (feedback): feedback is PreservedFeedback => !!feedback.name && isValidFullName(feedback.name, surname),
+    );
     const exclude = new Set<string>(excludeCandidateNames);
-    const likedFb = candidateFeedbacks.filter((f: any) => f.feedback === "like");
-    likedFb.forEach((f: any) => exclude.delete(f.name || ""));
+    preservedLiked.forEach((feedback) => exclude.delete(feedback.name));
 
     // additionalNote（第一步补充）和 refinementNote（第三步微调）合并传入 prompt
     const combinedNote = [additionalNote, refinementNote].filter(Boolean).join("；");
     const aiResult = await callWithRetry(
       buildPrompt({ surname, expectations, feedbacks: candidateFeedbacks, refinements, note: combinedNote, excludeNames: [...exclude], isRefresh: true }),
-      0.7, 1000
+      0.7, 1000, options.aiClient,
     );
-    const aiCandidates = normalize(aiResult.candidates, surname, true)
+    const aiCandidates = normalize(aiResult.candidates, surname, refinedCandidateOutputSchema)
       .filter((candidate) => !exclude.has(candidate.name))
       .slice(0, SHORTLIST_SIZE);
     const usedFallback = aiCandidates.length < SHORTLIST_SIZE;
@@ -523,6 +692,15 @@ export function createApp(options: AppOptions = {}) {
       SHORTLIST_SIZE,
     );
     const meta = generationMeta(aiCandidates.length, usedFallback, aiResult.failureReason);
+    const fallbackCandidateCount = Math.max(0, candidates.length - aiCandidates.length);
+
+    setGenerationMetric(res, {
+      requestId: refreshRequestId,
+      ...meta,
+      aiAttemptCount: aiResult.attemptCount,
+      acceptedAiCandidateCount: aiCandidates.length,
+      fallbackCandidateCount,
+    });
 
     if (candidates.length === 0) {
       res.status(400).json({ error: "NO_MORE_CANDIDATES", message: "no more candidates available under current constraints" });
@@ -531,10 +709,9 @@ export function createApp(options: AppOptions = {}) {
 
     await ensureCnchar();
     candidates = applyTip(candidates);
-    candidates = mergeLiked(candidates, likedFb, surname, refinements);
-    const shortlistId = crypto.randomUUID();
-    console.log(`[refresh] rid=${shortlistId.slice(0, 8)} count=${candidates.length}`);
-    res.json({ shortlistRequestId: shortlistId, candidates, ...meta });
+    candidates = mergeLiked(candidates, preservedLiked, surname, refinements);
+    console.log(`[refresh] rid=${refreshRequestId.slice(0, 8)} count=${candidates.length}`);
+    res.json({ shortlistRequestId: refreshRequestId, candidates, ...meta });
   }));
 
   const errorHandler: ErrorRequestHandler = (error, req, res, next) => {
