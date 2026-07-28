@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { AppState, FeedbackRecord, FeedbackType, Candidate, RefinedCandidate } from '../types/naming';
 
 /** fetch 超时包装：30s 后自动 abort */
@@ -43,13 +43,29 @@ function degradationNotice(data: {
 
 const STORAGE_KEY = 'naming_saved_candidates';
 
+function candidateKey(candidate: Pick<RefinedCandidate, 'name'>): string {
+  return candidate.name.normalize('NFC').trim();
+}
+
+function isSavedCandidate(value: unknown): value is RefinedCandidate {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return ['id', 'name', 'meaning', 'origin', 'coreMeaning', 'fitReason', 'tip']
+    .every((key) => typeof candidate[key] === 'string');
+}
+
 /** 从 localStorage 读取收藏的候选名字 */
 function loadSavedCandidates(): RefinedCandidate[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    const unique = new Map<string, RefinedCandidate>();
+    parsed.filter(isSavedCandidate).forEach((candidate) => {
+      unique.set(candidateKey(candidate), candidate);
+    });
+    return [...unique.values()];
   } catch {
     return [];
   }
@@ -59,6 +75,7 @@ export function useNamingFlow() {
   const [appState, setAppState] = useState<AppState>('input');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [noticeMessage, setNoticeMessage] = useState<string | null>(null);
+  const requestInFlight = useRef(false);
   
   // Phase 1 inputs
   const [surname, setSurname] = useState('');
@@ -83,7 +100,10 @@ export function useNamingFlow() {
 
   // 收藏的候选名字（跨 swap 保留完整对象，跨会话持久化到 localStorage）
   const [savedCandidates, setSavedCandidates] = useState<RefinedCandidate[]>(loadSavedCandidates);
-  const bookmarkedIds: Set<string> = useMemo(() => new Set(savedCandidates.map(c => c.id)), [savedCandidates]);
+  const bookmarkedNames: Set<string> = useMemo(
+    () => new Set(savedCandidates.map(candidateKey)),
+    [savedCandidates],
+  );
 
   // 收藏变更时自动持久化
   useEffect(() => {
@@ -112,9 +132,10 @@ export function useNamingFlow() {
   const toggleBookmark = (id: string) => {
     const candidate = shortlistCandidates.find(c => c.id === id);
     if (!candidate) return;
+    const key = candidateKey(candidate);
     setSavedCandidates(prev =>
-      prev.some(c => c.id === id)
-        ? prev.filter(c => c.id !== id)
+      prev.some(c => candidateKey(c) === key)
+        ? prev.filter(c => candidateKey(c) !== key)
         : [...prev, candidate]
     );
   };
@@ -130,8 +151,14 @@ export function useNamingFlow() {
 
   // Actions
   const generateBatch1 = async () => {
-    if (!surname || selectedTraits.length === 0) return;
-    if (appState === 'generating_batch1') return; // 防双击
+    const normalizedSurname = surname.trim();
+    if (!/^\p{Script=Han}{1,2}$/u.test(normalizedSurname)) {
+      setErrorMessage('请输入 1–2 个汉字的姓氏后再生成');
+      return;
+    }
+    if (selectedTraits.length === 0) return;
+    if (requestInFlight.current || appState === 'generating_batch1') return;
+    requestInFlight.current = true;
     setAppState('generating_batch1');
     setErrorMessage(null);
     setNoticeMessage(null);
@@ -141,7 +168,7 @@ export function useNamingFlow() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          surname,
+          surname: normalizedSurname,
           expectations: selectedTraits,
           additionalNote: additionalInput,
         }),
@@ -159,6 +186,8 @@ export function useNamingFlow() {
       setErrorMessage(classifyFetchError(err, '生成候选名字失败，请稍后重试'));
       setLastFailedAction(() => generateBatch1);
       setAppState('input');
+    } finally {
+      requestInFlight.current = false;
     }
   };
 
@@ -177,7 +206,8 @@ export function useNamingFlow() {
   };
 
   const generateShortlist = async () => {
-    if (appState === 'generating_shortlist') return; // 防双击
+    if (requestInFlight.current || appState === 'generating_shortlist') return;
+    requestInFlight.current = true;
     setAppState('generating_shortlist');
     setErrorMessage(null);
     setNoticeMessage(null);
@@ -210,11 +240,14 @@ export function useNamingFlow() {
       setErrorMessage(classifyFetchError(err, '请求精细筛选时出错，请稍候重试'));
       setLastFailedAction(() => generateShortlist);
       setAppState('batch1_ready');
+    } finally {
+      requestInFlight.current = false;
     }
   };
 
   const swapShortlist = async () => {
-    if (appState === 'generating_shortlist') return; // 防双击
+    if (requestInFlight.current || appState === 'generating_shortlist') return;
+    requestInFlight.current = true;
     setAppState('generating_shortlist');
     setErrorMessage(null);
     setNoticeMessage(null);
@@ -248,13 +281,16 @@ export function useNamingFlow() {
       setErrorMessage(classifyFetchError(err, '请求换一组时出错，请稍候重试'));
       setLastFailedAction(() => swapShortlist);
       setAppState('shortlist_ready');
+    } finally {
+      requestInFlight.current = false;
     }
   };
 
   // 不切换状态，仅滚动到微调区域，保持 shortlist 可见
   const scrollToRefinement = () => {
     setTimeout(() => {
-      document.getElementById('refinement-section')?.scrollIntoView({ behavior: 'smooth' });
+      const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+      document.getElementById('refinement-section')?.scrollIntoView({ behavior });
     }, 100);
   };
 
@@ -292,7 +328,7 @@ export function useNamingFlow() {
     feedbacks, handleFeedback, hasFeedbacks,
     selectedRefinements, setSelectedRefinements,
     refinementInput, setRefinementInput,
-    bookmarkedIds, savedCandidates, toggleBookmark,
+    bookmarkedNames, savedCandidates, toggleBookmark,
     generateBatch1, generateShortlist, swapShortlist, scrollToRefinement, restart
   };
 }

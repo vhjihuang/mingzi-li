@@ -21,6 +21,8 @@ export function ShortlistCard({ candidate, isBookmarked, onBookmark, onEdit }: S
         <div className="flex items-center gap-2">
           <button 
             onClick={onBookmark}
+            aria-label={isBookmarked ? `取消收藏 ${candidate.name}` : `收藏 ${candidate.name}`}
+            aria-pressed={isBookmarked}
             className={`p-2 border rounded-full transition-all cursor-pointer ${isBookmarked ? 'text-yellow-500 border-yellow-200 bg-yellow-50 shadow-inner' : 'text-gray-400 hover:text-gray-900 border-transparent hover:border-gray-200 hover:bg-gray-50'}`} 
             title="收藏"
           >
@@ -34,7 +36,7 @@ export function ShortlistCard({ candidate, isBookmarked, onBookmark, onEdit }: S
         <div className="pt-2">
           <div className="flex items-center gap-1.5 mb-1.5 text-gray-400">
             <BookOpen className="w-3.5 h-3.5" />
-            <span className="text-xs font-semibold tracking-wider">典故出处</span>
+            <span className="text-xs font-semibold tracking-wider">取意说明</span>
           </div>
           <p className="text-gray-700 text-sm leading-relaxed">{candidate.origin}</p>
         </div>

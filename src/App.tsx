@@ -8,6 +8,7 @@ import { AnimatePresence } from 'motion/react';
 import { RotateCcw, AlertCircle, RefreshCw } from 'lucide-react';
 
 import { useNamingFlow } from './hooks/useNamingFlow';
+import { useReducedMotionPreference } from './hooks/useReducedMotionPreference';
 
 import { NamingInputSection } from './components/sections/NamingInputSection';
 import { CandidateBatchSection } from './components/sections/CandidateBatchSection';
@@ -16,6 +17,8 @@ import { ShortlistSection } from './components/sections/ShortlistSection';
 
 export default function App() {
   const flow = useNamingFlow();
+  const prefersReducedMotion = useReducedMotionPreference();
+  const scrollBehavior = prefersReducedMotion ? 'auto' : 'smooth';
 
   const toggleTrait = (tag: string) => {
     flow.setSelectedTraits(prev => 
@@ -34,23 +37,27 @@ export default function App() {
   useEffect(() => {
     // 出错时滚动到顶部，确保用户看到错误提示
     if (flow.errorMessage) {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo({ top: 0, behavior: scrollBehavior });
       return;
     }
+    let timer: number | undefined;
     if (flow.appState === 'batch1_ready') {
-      setTimeout(() => {
-        document.getElementById('batch-section')?.scrollIntoView({ behavior: 'smooth' });
+      timer = window.setTimeout(() => {
+        document.getElementById('batch-section')?.scrollIntoView({ behavior: scrollBehavior });
       }, 100);
     } else if (flow.appState === 'generating_shortlist') {
-      setTimeout(() => {
-        document.getElementById('shortlist-section')?.scrollIntoView({ behavior: 'smooth' });
+      timer = window.setTimeout(() => {
+        document.getElementById('shortlist-section')?.scrollIntoView({ behavior: scrollBehavior });
       }, 100);
     } else if (flow.appState === 'shortlist_ready') {
-      setTimeout(() => {
-        document.getElementById('shortlist-section')?.scrollIntoView({ behavior: 'smooth' });
+      timer = window.setTimeout(() => {
+        document.getElementById('shortlist-section')?.scrollIntoView({ behavior: scrollBehavior });
       }, 100);
     }
-  }, [flow.appState, flow.errorMessage]);
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [flow.appState, flow.errorMessage, scrollBehavior]);
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 font-sans selection:bg-gray-200">
@@ -75,7 +82,7 @@ export default function App() {
           </div>
           
           {flow.errorMessage && (
-            <div className="mt-6 p-4 rounded-lg bg-red-50 border border-red-100 text-red-600 text-sm flex items-start gap-3">
+            <div role="alert" aria-live="assertive" className="mt-6 p-4 rounded-lg bg-red-50 border border-red-100 text-red-600 text-sm flex items-start gap-3">
               <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
               <div className="flex-1">
                 <span className="font-medium">出了点问题：</span>{flow.errorMessage}
@@ -93,7 +100,7 @@ export default function App() {
           )}
 
           {flow.noticeMessage && (
-            <div className="mt-6 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm flex items-start gap-3">
+            <div role="status" aria-live="polite" className="mt-6 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm flex items-start gap-3">
               <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
               <div className="flex-1">
                 <span className="font-medium">结果说明：</span>{flow.noticeMessage}
@@ -145,7 +152,7 @@ export default function App() {
               appState={flow.appState}
               surname={flow.surname}
               candidates={flow.shortlistCandidates}
-              bookmarkedIds={flow.bookmarkedIds}
+              bookmarkedNames={flow.bookmarkedNames}
               savedCandidates={flow.savedCandidates}
               onBookmark={flow.toggleBookmark}
               onEdit={flow.scrollToRefinement}
@@ -156,7 +163,7 @@ export default function App() {
         </AnimatePresence>
 
         <footer className="pt-4 border-t border-gray-200 text-xs leading-relaxed text-gray-400">
-          候选名字及典故解析由 AI 辅助生成，仅供参考，重要出处请自行核验；输入内容可能发送至第三方模型服务进行处理。
+          候选名字及取意解析由 AI 辅助生成，仅供参考。输入内容可能发送至第三方模型服务进行处理。
         </footer>
 
       </div>

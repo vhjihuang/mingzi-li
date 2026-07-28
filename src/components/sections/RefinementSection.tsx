@@ -3,6 +3,7 @@ import { AppState } from '../../types/naming';
 import { Loader2, Lock, RefreshCw } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useState, useEffect } from 'react';
+import { useReducedMotionPreference } from '../../hooks/useReducedMotionPreference';
 
 interface Props {
   appState: AppState;
@@ -20,6 +21,7 @@ export function RefinementSection({
 }: Props) {
   const isGenerating = appState === 'generating_shortlist';
   const disabled = isGenerating || !hasFeedbacks;
+  const prefersReducedMotion = useReducedMotionPreference();
 
   const [displayedTags, setDisplayedTags] = useState(REFINEMENT_TAGS);
 
@@ -41,9 +43,9 @@ export function RefinementSection({
   return (
     <motion.section
       id="refinement-section"
-      initial={{ opacity: 0, y: 20 }}
+      initial={prefersReducedMotion ? false : { opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.4 }}
+      transition={prefersReducedMotion ? { duration: 0 } : { delay: 0.4 }}
       className={`bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-gray-200 mt-4 transition-all duration-300 ${!hasFeedbacks ? 'opacity-80 bg-gray-50 border-dashed' : ''}`}
     >
       <div className="flex items-center justify-between mb-4">
@@ -66,6 +68,7 @@ export function RefinementSection({
             <button 
               onClick={handleRefreshTags}
               disabled={disabled}
+              aria-label="换一批微调标签"
               className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
@@ -78,6 +81,7 @@ export function RefinementSection({
                 key={tag}
                 onClick={() => toggleRefinement(tag)}
                 disabled={disabled}
+                aria-pressed={selectedRefinements.includes(tag)}
                 className={`px-4 py-2.5 rounded-full border text-sm transition-all duration-200 cursor-pointer
                   ${selectedRefinements.includes(tag) 
                     ? 'bg-gray-900 text-white border-gray-900 shadow-md' 
@@ -91,7 +95,9 @@ export function RefinementSection({
         </div>
 
         <div>
+          <label htmlFor="refinement-note" className="sr-only">补充微调方向</label>
           <input
+            id="refinement-note"
             type="text"
             placeholder="补充一句，例如：想保留温和感，但别太软..."
             value={refinementInput}

@@ -19,7 +19,8 @@ export function NamingInputSection({
   additionalInput, setAdditionalInput, onGenerate
 }: Props) {
   const isGenerating = appState === 'generating_batch1';
-  const isDisabled = !surname.trim() || selectedTraits.length === 0 || appState !== 'input';
+  const isSurnameValid = /^\p{Script=Han}{1,2}$/u.test(surname.trim());
+  const isDisabled = !isSurnameValid || selectedTraits.length === 0 || appState !== 'input';
 
   const [displayedTags, setDisplayedTags] = useState(EXPECTATION_TAGS);
 
@@ -42,16 +43,22 @@ export function NamingInputSection({
     <section className="bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-gray-200">
       <div className="space-y-8">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">姓氏</label>
+          <label htmlFor="surname" className="block text-sm font-medium text-gray-700 mb-2">姓氏</label>
           <input
+            id="surname"
             type="text"
             placeholder="请输入姓氏，例如：林"
             value={surname}
-            onChange={e => setSurname(e.target.value)}
+            onChange={e => setSurname(e.target.value.replace(/\s/g, ''))}
             disabled={appState !== 'input'}
             maxLength={2}
+            inputMode="text"
+            aria-describedby="surname-help"
             className="w-full md:w-64 px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all disabled:opacity-50"
           />
+          <p id="surname-help" className="mt-2 text-xs text-gray-500">
+            {surname && !isSurnameValid ? '请输入 1–2 个汉字的姓氏。' : '支持单姓和复姓。'}
+          </p>
         </div>
 
         <div>
@@ -62,6 +69,7 @@ export function NamingInputSection({
             <button 
               onClick={handleRefreshTags}
               disabled={appState !== 'input'}
+              aria-label="换一批期待标签"
               className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
@@ -74,6 +82,7 @@ export function NamingInputSection({
                 key={tag}
                 onClick={() => toggleTrait(tag)}
                 disabled={appState !== 'input'}
+                aria-pressed={selectedTraits.includes(tag)}
                 className={`px-4 py-2.5 rounded-full border text-sm transition-all duration-200 cursor-pointer
                   ${selectedTraits.includes(tag) 
                     ? 'bg-gray-900 text-white border-gray-900 shadow-md' 
@@ -87,10 +96,11 @@ export function NamingInputSection({
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
+          <label htmlFor="additional-note" className="block text-sm font-medium text-gray-700 mb-2">
             还有什么特别在意的？<span className="text-gray-400 font-normal ml-2">(可不填)</span>
           </label>
           <input
+            id="additional-note"
             type="text"
             placeholder="例如：想有一点书卷气、不要太热门..."
             value={additionalInput}
