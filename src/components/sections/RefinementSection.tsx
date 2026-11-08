@@ -46,7 +46,7 @@ export function RefinementSection({
       initial={prefersReducedMotion ? false : { opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={prefersReducedMotion ? { duration: 0 } : { delay: 0.4 }}
-      className={`bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-gray-200 mt-4 transition-all duration-300 ${!hasFeedbacks ? 'opacity-80 bg-gray-50 border-dashed' : ''}`}
+      className={`bg-white p-6 md:p-8 rounded-lg border border-gray-200 transition-all duration-300 ${!hasFeedbacks ? 'opacity-80 bg-gray-50 border-dashed' : ''}`}
     >
       <div className="flex items-center justify-between mb-4">
         <h2 className={`text-xl font-medium tracking-tight ${!hasFeedbacks ? 'text-gray-400' : 'text-gray-900'}`}>
@@ -56,8 +56,8 @@ export function RefinementSection({
       </div>
       
       {!hasFeedbacks && (
-        <p className="text-sm text-gray-500 mb-6 flex items-center gap-2">
-          (需要您先在上方对至少一个名字完成“喜欢 / 一般 / 不喜欢”的评价，以解锁深度微调)
+        <p className="text-sm text-gray-500 mb-6">
+          评价上方任一名字后解锁。
         </p>
       )}
       
@@ -69,7 +69,7 @@ export function RefinementSection({
               onClick={handleRefreshTags}
               disabled={disabled}
               aria-label="换一批微调标签"
-              className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer"
+              className="text-xs text-gray-600 underline underline-offset-4 decoration-gray-300 hover:text-gray-900 flex items-center gap-1 transition-colors disabled:opacity-50 cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
               换一批选项
@@ -103,7 +103,6 @@ export function RefinementSection({
             value={refinementInput}
             onChange={e => setRefinementInput(e.target.value)}
             disabled={disabled}
-            maxLength={100}
             className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all disabled:opacity-50"
           />
         </div>
@@ -112,7 +111,7 @@ export function RefinementSection({
           <button 
             onClick={onGenerateShortlist}
             disabled={disabled}
-            className="w-full md:w-auto px-8 py-3.5 bg-gray-900 text-white font-medium rounded-xl hover:bg-gray-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
+            className="w-full md:w-auto px-8 py-3.5 bg-gray-900 text-white font-medium rounded-lg hover:bg-gray-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
           >
             {isGenerating && <Loader2 className="w-5 h-5 animate-spin" />}
             {isGenerating ? '精细筛选中...' : '基于我的反馈重新筛一轮'}
