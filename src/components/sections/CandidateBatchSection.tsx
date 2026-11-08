@@ -1,7 +1,6 @@
 import { motion } from 'motion/react';
 import { CandidateCard } from '../cards/CandidateCard';
 import { Candidate, FeedbackRecord, FeedbackType, AppState } from '../../types/naming';
-import { Loader2 } from 'lucide-react';
 import { useReducedMotionPreference } from '../../hooks/useReducedMotionPreference';
 
 interface Props {
@@ -33,20 +32,30 @@ export function CandidateBatchSection({ appState, surname, candidates, feedbacks
       </div>
 
       {isGenerating ? (
-        <div role="status" aria-live="polite" className="min-h-[600px] flex flex-col items-center justify-center space-y-4">
-          <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
-          <p className="text-gray-500 font-medium animate-pulse">正在生成初版名字清单，请稍候...</p>
+        <div role="status" aria-live="polite" className="space-y-4">
+          <p className="text-center text-gray-500 font-medium animate-pulse">正在生成初版名字清单，请稍候...</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4" aria-hidden="true">
+            {[0, 1, 2].map((item) => (
+              <div key={item} className="rounded-lg border border-gray-200 bg-white p-5 animate-pulse">
+                <div className="mb-4 h-7 w-24 rounded bg-gray-200" />
+                <div className="mb-2 h-4 w-full rounded bg-gray-100" />
+                <div className="mb-6 h-4 w-5/6 rounded bg-gray-100" />
+                <div className="h-10 w-full rounded-lg bg-gray-100" />
+              </div>
+            ))}
+          </div>
         </div>
       ) : (
         <>
           <div className="text-center text-sm md:text-base text-gray-500 mb-4">
-            💡 至少评价一个名字即可解锁下方微调，评价越多推荐越准；最多保留 3 个“喜欢”。
+            评价越多，推荐越准；最多选 3 个「喜欢」。
           </div>
-          
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {candidates.map((candidate, i) => (
-              <motion.div 
+              <motion.div
                 key={candidate.id}
+                data-candidate-card
                 initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={prefersReducedMotion ? { duration: 0 } : { delay: i * 0.05, type: "spring", stiffness: 200, damping: 20 }}

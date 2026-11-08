@@ -29,7 +29,7 @@ export function CandidateCard({ candidate, feedback, canSelectLike, onFeedback }
   };
 
   return (
-    <div className="border border-gray-200 rounded-xl p-5 bg-white shadow-sm flex flex-col justify-between h-full">
+    <div className="border border-gray-200 rounded-lg p-5 bg-white flex flex-col justify-between h-full">
       <div>
         <h3 className="text-2xl font-medium tracking-tight mb-3">
           {candidate.name}
@@ -49,7 +49,7 @@ export function CandidateCard({ candidate, feedback, canSelectLike, onFeedback }
             aria-pressed={currentType === 'like'}
             title={currentType !== 'like' && !canSelectLike ? '短名单最多保留 3 个喜欢的名字' : undefined}
             className={`flex-1 py-2 rounded-lg border text-sm font-medium transition-colors flex items-center justify-center gap-1.5 cursor-pointer
-              ${currentType === 'like' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'} disabled:opacity-50 disabled:cursor-not-allowed`}
+              ${currentType === 'like' ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'} disabled:opacity-50 disabled:cursor-not-allowed`}
           >
             <Smile className={`w-4 h-4 ${currentType === 'like' ? 'text-green-700' : 'text-green-500'}`} /> 喜欢
           </button>
@@ -57,7 +57,7 @@ export function CandidateCard({ candidate, feedback, canSelectLike, onFeedback }
             onClick={() => handleTypeClick('neutral')}
             aria-pressed={currentType === 'neutral'}
             className={`flex-1 py-2 rounded-lg border text-sm font-medium transition-colors flex items-center justify-center gap-1.5 cursor-pointer
-              ${currentType === 'neutral' ? 'bg-orange-50 border-orange-200 text-orange-700' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'}`}
+              ${currentType === 'neutral' ? 'bg-orange-50 border-orange-200 text-orange-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}`}
           >
             <Meh className={`w-4 h-4 ${currentType === 'neutral' ? 'text-orange-700' : 'text-orange-400'}`} /> 一般
           </button>
@@ -65,30 +65,13 @@ export function CandidateCard({ candidate, feedback, canSelectLike, onFeedback }
             onClick={() => handleTypeClick('dislike')}
             aria-pressed={currentType === 'dislike'}
             className={`flex-1 py-2 rounded-lg border text-sm font-medium transition-colors flex items-center justify-center gap-1.5 cursor-pointer
-              ${currentType === 'dislike' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'}`}
+              ${currentType === 'dislike' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}`}
           >
             <Frown className={`w-4 h-4 ${currentType === 'dislike' ? 'text-red-700' : 'text-red-500'}`} /> 不喜欢
           </button>
         </div>
 
         <AnimatePresence>
-          {currentType === 'like' && (
-            <motion.div
-              initial={prefersReducedMotion ? false : { opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={prefersReducedMotion ? { duration: 0 } : undefined}
-              className="overflow-hidden"
-            >
-              <div className="pt-2">
-                <div className="bg-green-50/80 border border-green-100 px-3 py-2.5 rounded-lg text-sm text-green-800 flex items-start gap-2">
-                  <div className="mt-0.5">✨</div>
-                  <p className="leading-relaxed">太好了！我们会将此名字作为重点，在下方的深度筛选阶段自动为您保留并生成详细的起名解析。</p>
-                </div>
-              </div>
-            </motion.div>
-          )}
-          
           {(currentType === 'neutral' || currentType === 'dislike') && (
             <motion.div
               initial={prefersReducedMotion ? false : { opacity: 0, height: 0 }}

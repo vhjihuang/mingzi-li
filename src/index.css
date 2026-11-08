@@ -1,8 +1,56 @@
 @import "tailwindcss";
 
+/* 纸白 + 墨 + 朱砂：去掉奶油调，红色只留给品牌动作 */
+@theme {
+  --color-gray-50: #f7f6f3;
+  --color-gray-100: #f1efea;
+  --color-gray-200: #e4e1da;
+  --color-gray-300: #cfcac1;
+  --color-gray-400: #a39d94;
+  --color-gray-500: #78736c;
+  --color-gray-600: #5a554f;
+  --color-gray-700: #423e39;
+  --color-gray-800: #2c2925;
+  --color-gray-900: #191817;
+
+  --color-brand-50: #fbf1ee;
+  --color-brand-100: #f6e2dc;
+  --color-brand-200: #ebc8be;
+  --color-brand-500: #b8513e;
+  --color-brand-600: #a63a2b;
+  --color-brand-700: #8b2e21;
+
+  --color-green-50: #eef4f1;
+  --color-green-100: #dceae5;
+  --color-green-200: #bfd8cf;
+  --color-green-500: #5e8b7c;
+  --color-green-600: #4f7a6a;
+  --color-green-700: #3f6355;
+  --color-green-800: #315046;
+
+  --color-orange-50: #f8f3e7;
+  --color-orange-200: #e5d7ba;
+  --color-orange-400: #b99a62;
+  --color-orange-700: #7e6431;
+
+  /* 灰褐：仅用于“不喜欢”，避免与朱砂抢红色语义 */
+  --color-red-50: #f3f0ec;
+  --color-red-100: #e9e3dc;
+  --color-red-200: #d8cfc5;
+  --color-red-500: #8a7a70;
+  --color-red-600: #75655c;
+  --color-red-700: #62544c;
+
+  --color-amber-50: #faf6ec;
+  --color-amber-100: #f2ebdc;
+  --color-amber-200: #e4d7be;
+  --color-amber-600: #8a6f3d;
+  --color-amber-800: #5a4520;
+}
+
 button:focus-visible,
 input:focus-visible {
-  outline: 2px solid #111827;
+  outline: 2px solid #191817;
   outline-offset: 2px;
 }
 
