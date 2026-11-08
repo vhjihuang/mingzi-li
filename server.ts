@@ -26,7 +26,7 @@ async function start() {
   app.listen(PORT, "0.0.0.0", () => {
     const hasKey = !!process.env.GLM_API_KEY;
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`AI client: ${hasKey ? "enabled (GLM-4.7)" : "disabled (no GLM_API_KEY)"}`);
+    console.log(`AI client: ${hasKey ? "enabled" : "disabled (no GLM_API_KEY)"}`);
   });
 }
 

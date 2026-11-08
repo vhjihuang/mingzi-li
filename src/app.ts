@@ -38,8 +38,10 @@ async function ensureCnchar() {
 
 // ── 配置 ──
 
-const AI_MODEL = "glm-4.7";
-const AI_TIMEOUT_MS = 18_000;
+// ponytail: glm-4.5-flash 免费且实测 12s 返回 6 个通过校验的候选；
+// glm-4.7-flash 高峰期 33-81s，且 origin 常写成“取…之义”被质量校验拒绝
+const AI_MODEL = "glm-4.5-flash";
+const AI_TIMEOUT_MS = 45_000;
 const BATCH_SIZE = 6;
 const SHORTLIST_SIZE = 3;
 const DEFAULT_RATE_LIMIT_MAX = 30;
@@ -379,14 +381,17 @@ function classifyAiError(error: unknown): { reason: AiFailureReason; retryable: 
     return { reason: "AI_AUTH_ERROR", retryable: false, status };
   }
   if (status === 429) {
-    return { reason: "AI_RATE_LIMITED", retryable: false, status };
+    // GLM 免费模型拥堵返回 1305，可快速重试；1113（余额不足）重试无意义
+    const congested = message.includes("1305");
+    return { reason: "AI_RATE_LIMITED", retryable: congested, status };
   }
   if (
     name.includes("Timeout")
     || name === "AbortError"
     || message.toLowerCase().includes("timeout")
   ) {
-    return { reason: "AI_TIMEOUT", retryable: true, status };
+    // 单次已等 45s，再重试会让用户等 1.5 分钟，直接走降级候选
+    return { reason: "AI_TIMEOUT", retryable: false, status };
   }
   if (error instanceof SyntaxError || message === "missing candidates") {
     return { reason: "AI_INVALID_RESPONSE", retryable: true, status };
@@ -398,7 +403,7 @@ function classifyAiError(error: unknown): { reason: AiFailureReason; retryable: 
   };
 }
 
-/** 只对可能恢复的错误重试一次，最大模型等待时间约 36 秒。 */
+/** 最多 3 次尝试：仅对拥堵（1305）快速重试，其余错误直接降级。 */
 async function callWithRetry(
   prompt: string,
   temp: number,
@@ -411,10 +416,12 @@ async function callWithRetry(
   }
 
   let failureReason: AiFailureReason = "AI_INVALID_RESPONSE";
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  let attemptCount = 0;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    attemptCount = attempt;
     try {
       const candidates = await callAi(client, prompt, temp, maxTokens);
-      if (candidates.length > 0) return { candidates, attemptCount: attempt };
+      if (candidates.length > 0) return { candidates, attemptCount };
       failureReason = "AI_INVALID_RESPONSE";
     } catch (error) {
       const failure = classifyAiError(error);
@@ -424,10 +431,12 @@ async function callWithRetry(
         reason: failure.reason,
         status: failure.status,
       });
-      if (!failure.retryable) break;
+      if (!failure.retryable || attempt === 3) break;
+      // 拥堵通常几百毫秒即返回，短暂退避后再试
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
     }
   }
-  return { candidates: [], failureReason, attemptCount: 2 };
+  return { candidates: [], failureReason, attemptCount };
 }
 
 // ── 后处理 ──
